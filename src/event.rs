@@ -6,6 +6,7 @@ use crate::db::indexes::{IndexRow, UnindexedForeignKey};
 use crate::db::serverinfo::ServerInfo;
 use crate::db::statements::StatementsData;
 use crate::db::tables::TablesData;
+use crate::db::triggers::TriggerRow;
 
 /// One variant per independently-fetched, independently-failable block —
 /// each Cache & I/O block in particular used to be one bundled fetch where
@@ -25,6 +26,7 @@ pub enum PanelSnapshot {
     Databases(Vec<DatabaseRow>),
     Statements(StatementsData),
     Activity(ActivityData),
+    Triggers(Vec<TriggerRow>),
 }
 
 impl PanelSnapshot {
@@ -46,6 +48,7 @@ impl PanelSnapshot {
             PanelSnapshot::Databases(_) => "databases",
             PanelSnapshot::Statements(_) => "pg_stat_statements",
             PanelSnapshot::Activity(_) => "activity",
+            PanelSnapshot::Triggers(_) => "triggers",
         }
     }
 }

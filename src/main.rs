@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
                     app.current_dbname = Some(chosen);
                 }
                 Err(e) => {
-                    app.status = Some((format!("failed to switch to '{chosen}': {e:#}"), StatusLevel::Warn));
+                    app.set_status(format!("failed to switch to '{chosen}': {e:#}"), StatusLevel::Warn);
                 }
             }
         }
@@ -123,7 +123,7 @@ async fn run_startup_picker(
                             return Ok(match selected {
                                 Some((name, None)) => Some(name),
                                 Some((_, Some(reason))) => {
-                                    app.status = Some((reason.to_string(), StatusLevel::Warn));
+                                    app.set_status(reason.to_string(), StatusLevel::Warn);
                                     None
                                 }
                                 None => None,
@@ -287,6 +287,13 @@ fn handle_key(app: &mut App, code: KeyCode, refresh_now: &Arc<Notify>, control_t
         return;
     }
 
+    if app.trigger_detail_open {
+        if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
+            app.trigger_detail_open = false;
+        }
+        return;
+    }
+
     if app.db_popup.is_some() {
         match code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => app.close_db_popup(),
@@ -295,7 +302,7 @@ fn handle_key(app: &mut App, code: KeyCode, refresh_now: &Arc<Notify>, control_t
             KeyCode::Enter => {
                 if let Some(row) = app.popup_selected_database() {
                     if let Some(reason) = row.unswitchable_reason() {
-                        app.status = Some((reason.to_string(), StatusLevel::Warn));
+                        app.set_status(reason.to_string(), StatusLevel::Warn);
                     } else if Some(row.name.as_str()) != app.current_dbname.as_deref() {
                         let _ = control_tx.try_send(PollControl::SwitchDb(row.name.clone()));
                     }
@@ -314,21 +321,25 @@ fn handle_key(app: &mut App, code: KeyCode, refresh_now: &Arc<Notify>, control_t
         KeyCode::Char('3') => app.active = PanelKind::Activity,
         KeyCode::Char('4') => app.active = PanelKind::CacheIo,
         KeyCode::Char('5') => app.active = PanelKind::TablesIndexes,
+        KeyCode::Char('6') => app.active = PanelKind::Triggers,
         KeyCode::Char('d') => app.open_db_popup(),
         KeyCode::Char('e') if !app.errors.is_empty() => app.error_detail_open = true,
+        KeyCode::Enter if app.active == PanelKind::Triggers && app.selected_trigger().is_some() => {
+            app.trigger_detail_open = true;
+        }
         KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
         KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
         KeyCode::Char('s') => app.cycle_sort(),
         KeyCode::Char('r') => {
             refresh_now.notify_one();
-            app.status = Some(("refreshed".to_string(), StatusLevel::Info));
+            app.set_status("refreshed", StatusLevel::Info);
         }
         KeyCode::Char(' ') => {
             app.paused = !app.paused;
-            app.status = Some((
-                if app.paused { "paused".to_string() } else { "resumed \u{b7} live".to_string() },
+            app.set_status(
+                if app.paused { "paused" } else { "resumed \u{b7} live" },
                 if app.paused { StatusLevel::Warn } else { StatusLevel::Info },
-            ));
+            );
             let _ = control_tx.try_send(PollControl::TogglePause);
         }
         // '+' moves toward faster (lower ms) intervals, '-' toward slower.
@@ -362,7 +373,7 @@ fn bump_rate(app: &mut App, control_tx: &mpsc::Sender<PollControl>, dir: i32) {
     let new_idx = (idx as i32 + dir).clamp(0, RATE_OPTIONS_MS.len() as i32 - 1) as usize;
     app.rate = Duration::from_millis(RATE_OPTIONS_MS[new_idx]);
     let _ = control_tx.try_send(PollControl::SetInterval(app.rate));
-    app.status = Some((format!("refresh {}", format::human_rate(app.rate)), StatusLevel::Info));
+    app.set_status(format!("refresh {}", format::human_rate(app.rate)), StatusLevel::Info);
 }
 
 fn apply_event(app: &mut App, event: AppEvent) {
@@ -386,6 +397,7 @@ fn apply_event(app: &mut App, event: AppEvent) {
                 PanelSnapshot::Databases(data) => app.record_databases(data, now),
                 PanelSnapshot::Statements(data) => app.record_statements(data, now),
                 PanelSnapshot::Activity(data) => app.record_activity(data),
+                PanelSnapshot::Triggers(data) => app.triggers = Some(data),
             }
         }
         AppEvent::Error { source, message } => {
@@ -393,6 +405,6 @@ fn apply_event(app: &mut App, event: AppEvent) {
         }
         AppEvent::DbSwitched(name) => app.on_db_switched(name),
         AppEvent::ServerInfo(info) => app.server_info = Some(info),
-        AppEvent::Status(text, level) => app.status = Some((text, level)),
+        AppEvent::Status(text, level) => app.set_status(text, level),
     }
 }

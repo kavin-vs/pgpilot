@@ -106,19 +106,21 @@ pgpilot --ascii            # plain-ASCII glyphs
 | `3` | Activity | Connection-state summary cards, the full `pg_stat_activity` list (selectable), a blocking tree, and a lock/transaction summary |
 | `4` | Cache & I/O | Buffer cache hit ratio + sparkline, per-database cache hit, coldest relations (lowest cache hit), and checkpoints/WAL/replication stats |
 | `5` | Tables & Indexes | Schema size totals, a table list (dead-tuple %, xid age, seq-scans/hour, last autovacuum), unused/invalid indexes (with reclaimable size), and missing-index candidates (unindexed foreign keys, high seq-scan-ratio tables) |
+| `6` | Triggers | Every user-defined trigger (`pg_trigger`, excluding internal foreign-key-backing ones) — schema, table, function, enabled/disabled state; `enter` on a selected row opens a full-screen popup with that trigger's function source (`pg_get_functiondef`) |
 
 ### Keys
 
 | Key | Action |
 |---|---|
-| `1`–`5` | Switch tab |
-| `↑`/`↓` or `j`/`k` | Scroll/select rows on the current tab (Queries, Activity, Tables & Indexes) |
+| `1`–`6` | Switch tab |
+| `↑`/`↓` or `j`/`k` | Scroll/select rows on the current tab (Queries, Activity, Tables & Indexes, Triggers) |
 | `s` | Cycle sort (Queries: total time → mean time → calls; Tables & Indexes: size/name, press again to reverse) |
 | `x` / `X` | Cancel / terminate the selected Activity row's backend (`pg_cancel_backend`/`pg_terminate_backend`) — real, immediate, no confirmation prompt, same spirit as `htop`'s kill. Requires the `pg_signal_backend` role (or superuser); otherwise the attempt fails with a status message, not a crash |
 | `space` | Pause/resume polling |
 | `-` / `+` | Slow down / speed up the fast-tier poll rate |
 | `r` | Force an immediate refresh, without waiting for the next poll tick (works even while paused) |
 | `d` | Open a full-screen database picker (owner, size, sessions, tps, cache hit, state); `enter` reconnects to the selected one (same host/user/SSL, just a different `dbname`), `esc`/`q`/`d` closes it without switching |
+| `enter` | On the Triggers tab, with a row selected: open a full-screen popup showing that trigger's function source. `enter`/`esc`/`q` closes it |
 | `e` | View the full text of the current error(s) — only active when the footer shows a red error, since the footer's single line truncates long Postgres error messages. `e`/`esc`/`q` closes it |
 | `q` | Quit |
 
@@ -128,7 +130,7 @@ If a query fails (a permission issue, a Postgres-version-specific column, etc.),
 
 Tested against Postgres 13 through 17 — the Cache & I/O tab's checkpoint/WAL stats automatically use the right system view for the connected server's version (Postgres 17 moved those columns from `pg_stat_bgwriter` to a new `pg_stat_checkpointer` view).
 
-Polling is tiered, not one-size-fits-all: counters/activity refresh at the `--interval`/`-`/`+`-controlled rate, `pg_stat_statements` every 15s, and catalog-heavy data (dead tuples, xid age, unindexed FKs) every 5 minutes — polling everything at sub-second rates would make the monitor itself a load problem.
+Polling is tiered, not one-size-fits-all: counters/activity refresh at the `--interval`/`-`/`+`-controlled rate, `pg_stat_statements` every 15s, and catalog-heavy data (dead tuples, xid age, unindexed FKs, triggers) every 5 minutes — polling everything at sub-second rates would make the monitor itself a load problem.
 
 A small spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) shows up in two places: on the plain terminal while the initial connection is being made, and inside any panel that's still waiting on its first query result.
 

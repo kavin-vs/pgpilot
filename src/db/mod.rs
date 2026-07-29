@@ -18,6 +18,7 @@ pub mod serverinfo;
 pub mod statements;
 pub mod tables;
 pub mod tls;
+pub mod triggers;
 
 use statements::StatementsData;
 use tls::TlsMode;
@@ -157,12 +158,13 @@ async fn send_medium(client: &Client, tx: &mpsc::Sender<AppEvent>, has_pg_stat_s
 /// Catalog-heavy: dead-tuple %, xid age, unindexed FKs — fixed 5 minutes.
 /// Same per-query isolation as `send_fast`.
 async fn send_slow(client: &Client, tx: &mpsc::Sender<AppEvent>) -> bool {
-    let results: [(&str, Result<PanelSnapshot>); 2] = [
+    let results: [(&str, Result<PanelSnapshot>); 3] = [
         ("tables", tables::fetch(client).await.map(PanelSnapshot::Tables)),
         (
             "unindexed foreign keys",
             indexes::fetch_unindexed_foreign_keys(client).await.map(PanelSnapshot::UnindexedForeignKeys),
         ),
+        ("triggers", triggers::fetch(client).await.map(PanelSnapshot::Triggers)),
     ];
 
     let mut channel_open = true;

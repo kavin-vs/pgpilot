@@ -11,6 +11,7 @@ use crate::db::indexes::{IndexRow, UnindexedForeignKey};
 use crate::db::serverinfo::ServerInfo;
 use crate::db::statements::StatementsData;
 use crate::db::tables::TablesData;
+use crate::db::triggers::TriggerRow;
 use crate::event::StatusLevel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,15 +21,17 @@ pub enum PanelKind {
     Activity,
     CacheIo,
     TablesIndexes,
+    Triggers,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 5] = [
+    pub const ALL: [PanelKind; 6] = [
         PanelKind::Overview,
         PanelKind::Queries,
         PanelKind::Activity,
         PanelKind::CacheIo,
         PanelKind::TablesIndexes,
+        PanelKind::Triggers,
     ];
 
     pub fn title(&self) -> &'static str {
@@ -38,6 +41,7 @@ impl PanelKind {
             PanelKind::Activity => "Activity",
             PanelKind::CacheIo => "Cache & I/O",
             PanelKind::TablesIndexes => "Tables & Indexes",
+            PanelKind::Triggers => "Triggers",
         }
     }
 }
@@ -157,6 +161,7 @@ pub struct App {
     pub databases_prev: Option<(Vec<DatabaseRow>, Instant)>,
     pub statements: Option<(StatementsData, Instant)>,
     pub activity: Option<ActivityData>,
+    pub triggers: Option<Vec<TriggerRow>>,
     pub server_info: Option<ServerInfo>,
 
     pub history: History,
@@ -177,9 +182,16 @@ pub struct App {
     /// unwrapped text of every current error — the footer's single line
     /// truncates long Postgres error messages (DETAIL/HINT, etc.).
     pub error_detail_open: bool,
+    /// Toggled by `enter` while a Triggers row is selected, to show that
+    /// trigger's function source full-screen — same shape as
+    /// `error_detail_open`, just keyed off the selected row instead of
+    /// `errors`.
+    pub trigger_detail_open: bool,
     /// Transient status-line feedback (sort changed, refreshed, cancel/
-    /// terminate result) — distinct from the sticky `errors` banner.
-    pub status: Option<(String, StatusLevel)>,
+    /// terminate result) — distinct from the sticky `errors` banner. The
+    /// `Instant` lets the footer expire it back to the help text instead of
+    /// sticking forever (see `set_status`/`widgets::STATUS_TTL`).
+    pub status: Option<(String, StatusLevel, Instant)>,
     /// When the most recent snapshot was applied, for the "updated Xs ago" footer.
     pub last_refresh: Option<Instant>,
     pub should_quit: bool,
@@ -204,6 +216,8 @@ pub struct App {
     pub queries_sort: QueriesSortColumn,
 
     pub activity_state: TableState,
+
+    pub triggers_state: TableState,
 
     pub paused: bool,
     /// Current fast-tier poll interval — the only tier `-`/`+` adjust.
@@ -238,12 +252,14 @@ impl App {
             databases_prev: None,
             statements: None,
             activity: None,
+            triggers: None,
             server_info: None,
             history: History::default(),
             wait_event_counts: HashMap::new(),
             rollback_pct: None,
             errors: BTreeMap::new(),
             error_detail_open: false,
+            trigger_detail_open: false,
             status: None,
             last_refresh: None,
             should_quit: false,
@@ -258,6 +274,7 @@ impl App {
             queries_state: TableState::default(),
             queries_sort: QueriesSortColumn::Total,
             activity_state: TableState::default(),
+            triggers_state: TableState::default(),
             paused: false,
             rate,
             ascii,
@@ -272,6 +289,7 @@ impl App {
             },
             PanelKind::Activity => self.activity.as_ref().map_or(0, |a| a.rows.len()),
             PanelKind::TablesIndexes => self.tables.as_ref().map_or(0, |(t, _)| t.tables.len()),
+            PanelKind::Triggers => self.triggers.as_ref().map_or(0, |t| t.len()),
             _ => 0,
         }
     }
@@ -285,6 +303,7 @@ impl App {
             PanelKind::Queries => &mut self.queries_state,
             PanelKind::Activity => &mut self.activity_state,
             PanelKind::TablesIndexes => &mut self.tables_state,
+            PanelKind::Triggers => &mut self.triggers_state,
             _ => return,
         };
         let next = state.selected().map_or(0, |i| (i + 1).min(len - 1));
@@ -300,6 +319,7 @@ impl App {
             PanelKind::Queries => &mut self.queries_state,
             PanelKind::Activity => &mut self.activity_state,
             PanelKind::TablesIndexes => &mut self.tables_state,
+            PanelKind::Triggers => &mut self.triggers_state,
             _ => return,
         };
         let next = state.selected().map_or(0, |i| i.saturating_sub(1));
@@ -314,10 +334,7 @@ impl App {
             PanelKind::Queries => {
                 self.queries_sort = self.queries_sort.next();
                 self.sort_statements();
-                self.status = Some((
-                    format!("sorted by {}", self.queries_sort.label()),
-                    StatusLevel::Info,
-                ));
+                self.set_status(format!("sorted by {}", self.queries_sort.label()), StatusLevel::Info);
             }
             PanelKind::TablesIndexes => {
                 let next = self.tables_sort.next();
@@ -398,9 +415,17 @@ impl App {
         self.databases.as_ref()?.0.get(selected)
     }
 
+    pub fn set_status(&mut self, text: impl Into<String>, level: StatusLevel) {
+        self.status = Some((text.into(), level, Instant::now()));
+    }
+
     pub fn selected_activity_pid(&self) -> Option<i32> {
         let idx = self.activity_state.selected()?;
         self.activity.as_ref()?.rows.get(idx).map(|r| r.pid)
+    }
+
+    pub fn selected_trigger(&self) -> Option<&TriggerRow> {
+        self.triggers.as_ref()?.get(self.triggers_state.selected()?)
     }
 
     pub fn record_connections(&mut self, data: ConnectionsData) {
@@ -521,14 +546,17 @@ impl App {
         self.tables_rates.clear();
         self.statements = None;
         self.activity = None;
+        self.triggers = None;
         self.server_info = None;
         self.history = History::default();
         self.wait_event_counts.clear();
         self.rollback_pct = None;
         self.errors.clear();
         self.error_detail_open = false;
+        self.trigger_detail_open = false;
         self.tables_state = TableState::default();
         self.queries_state = TableState::default();
         self.activity_state = TableState::default();
+        self.triggers_state = TableState::default();
     }
 }

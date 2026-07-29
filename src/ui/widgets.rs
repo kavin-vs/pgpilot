@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -12,6 +14,11 @@ use crate::format::{human_bytes, human_duration, human_rate};
 use crate::ui::{charts, theme};
 
 pub const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// How long a transient footer status (refreshed, sorted by..., paused,
+/// etc.) stays visible before the footer reverts to the help text — without
+/// this it sticks forever, permanently hiding the keybinding hints.
+const STATUS_TTL: Duration = Duration::from_secs(3);
 
 pub fn spinner(frame: usize) -> char {
     SPINNER_FRAMES[frame % SPINNER_FRAMES.len()]
@@ -132,12 +139,34 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         None => "  |  no data yet".to_string(),
     };
 
-    let mut help =
-        "q: quit  1-5: view  j/k: move  s: sort  x/X: cancel/terminate  r: refresh  space: pause".to_string();
+    // Only advertise keys that actually do something on the active tab —
+    // mirrors app.rs's active_row_count/cycle_sort/cancel_or_terminate.
+    let has_rows = matches!(
+        app.active,
+        PanelKind::Queries | PanelKind::Activity | PanelKind::TablesIndexes | PanelKind::Triggers
+    );
+    let has_sort = matches!(app.active, PanelKind::Queries | PanelKind::TablesIndexes);
+
+    let mut help = "q: quit  1-6: view".to_string();
+    if has_rows {
+        help.push_str("  j/k: move");
+    }
+    if has_sort {
+        help.push_str("  s: sort");
+    }
+    if app.active == PanelKind::Activity {
+        help.push_str("  x/X: cancel/terminate");
+    }
+    help.push_str("  r: refresh  space: pause");
+    if app.active == PanelKind::Triggers {
+        help.push_str("  enter: view function");
+    }
     if app.can_switch_db {
         help.push_str("  d: database");
     }
     help.push_str(&format!("  -/+: rate {}", human_rate(app.rate)));
+
+    let status = app.status.as_ref().filter(|(_, _, at)| at.elapsed() < STATUS_TTL);
 
     let (text, style) = if let Some((source, message)) = app.errors.iter().next() {
         let summary = if app.errors.len() == 1 {
@@ -147,7 +176,7 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             format!("ERROR: {} issues — {}", app.errors.len(), sources.join(", "))
         };
         (format!("{summary}  (e: full error){updated}"), Style::default().fg(theme::BAD))
-    } else if let Some((status, level)) = &app.status {
+    } else if let Some((status, level, _)) = status {
         let color = if *level == StatusLevel::Warn { theme::WARN } else { theme::OK };
         (format!("{status}{updated}"), Style::default().fg(color))
     } else {

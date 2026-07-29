@@ -6,6 +6,7 @@ pub mod picker;
 pub mod queries;
 pub mod tables_indexes;
 pub mod theme;
+pub mod triggers;
 pub mod widgets;
 
 use ratatui::{
@@ -35,6 +36,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         PanelKind::Activity => activity::draw(frame, chunks[2], app),
         PanelKind::CacheIo => cache_io::draw(frame, chunks[2], app),
         PanelKind::TablesIndexes => tables_indexes::draw(frame, chunks[2], app),
+        PanelKind::Triggers => triggers::draw(frame, chunks[2], app),
     }
 
     widgets::draw_footer(frame, chunks[3], app);
@@ -45,5 +47,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.error_detail_open {
         widgets::draw_error_detail(frame, app);
+    }
+
+    if app.trigger_detail_open {
+        triggers::draw_detail_popup(frame, app);
     }
 }

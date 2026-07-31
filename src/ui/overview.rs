@@ -11,6 +11,7 @@ use ratatui::{
 use crate::app::App;
 use crate::db::statements::StatementsData;
 use crate::diagnosis::{self, DiagnosisInputs, Severity};
+use crate::format::human_bytes;
 use crate::ui::{charts, theme, widgets};
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
@@ -21,28 +22,51 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Length(6), Constraint::Percentage(35), Constraint::Percentage(30)])
+        .constraints([Constraint::Length(6), Constraint::Min(0)])
         .split(area);
 
-    draw_diagnosis(frame, rows[0], app);
-    draw_cards(frame, rows[1], app);
+    draw_cards(frame, rows[0], app);
 
-    let mid = Layout::default()
+    let rest = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(30), // top statements / wait events
+            Constraint::Percentage(42), // buffer cache / per-database / coldest
+            Constraint::Percentage(28), // checkpoints & buffers / replication
+        ])
+        .split(rows[1]);
+
+    let top = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(rows[2]);
-    draw_throughput(frame, mid[0], app);
-    draw_wait_events(frame, mid[1], app);
+        .split(rest[0]);
+    draw_top_statements(frame, top[0], app);
+    draw_wait_events(frame, top[1], app);
 
-    let bottom = Layout::default()
+    let cache = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(34), Constraint::Percentage(33), Constraint::Percentage(33)])
+        .split(rest[1]);
+    draw_cache_detail(frame, cache[0], app);
+    draw_per_database(frame, cache[1], app);
+    draw_coldest(frame, cache[2], app);
+
+    let checkpoints = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(rows[3]);
-    draw_top_statements(frame, bottom[0], app);
-    draw_alerts(frame, bottom[1], app);
+        .split(rest[2]);
+    draw_checkpoints(frame, checkpoints[0], app);
+    draw_replication(frame, checkpoints[1], app);
 }
 
-fn build_inputs(app: &App) -> DiagnosisInputs<'_> {
+fn fmt_pct(pct: Option<f64>) -> String {
+    match pct {
+        Some(p) => format!("{p:.2}%"),
+        None => "n/a".to_string(),
+    }
+}
+
+pub(crate) fn build_inputs(app: &App) -> DiagnosisInputs<'_> {
     DiagnosisInputs {
         tables: app.tables.as_ref().map(|(d, _)| d),
         indexes: app.indexes.as_deref(),
@@ -60,38 +84,32 @@ fn severity_color(s: Severity) -> Color {
     }
 }
 
-fn draw_diagnosis(frame: &mut Frame, area: Rect, app: &App) {
-    let inputs = build_inputs(app);
-    let diag = diagnosis::diagnose(&inputs);
-
-    let mut lines = vec![Line::styled(diag.headline, Style::default().fg(theme::TEXT_BRIGHT))];
-    for s in &diag.suspects {
-        let color = severity_color(s.severity);
-        lines.push(Line::from(vec![
-            Span::styled(format!("{}. ", s.rank), Style::default().fg(color)),
-            Span::styled(format!("{:<22}", s.kind), Style::default().fg(theme::TEXT)),
-            Span::styled(s.text.clone(), Style::default().fg(theme::TEXT_DIM)),
-            Span::raw("  "),
-            Span::styled(s.evidence.clone(), Style::default().fg(theme::TEXT_DIMMEST)),
-        ]));
-    }
-
-    let block = theme::block("Diagnosis").border_style(Style::default().fg(theme::BORDER_DIAGNOSIS));
-    frame.render_widget(Paragraph::new(lines).block(block), area);
-}
-
 fn draw_cards(frame: &mut Frame, area: Rect, app: &App) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(25); 4])
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(40), Constraint::Percentage(20)])
         .split(area);
 
     let max_conn = app.connections.as_ref().map(|c| c.max_connections).unwrap_or(0);
 
     render_card(frame, cols[0], app, "transactions", &app.history.tps, "/s", theme::TEXT, |v| format!("{v:.0}"));
-    render_card(frame, cols[1], app, "connections", &app.history.conn, &format!("/ {max_conn}"), conn_color(&app.history.conn, max_conn), |v| format!("{v:.0}"));
-    render_card(frame, cols[2], app, "cache hit", &app.history.cache_pct, "%", cache_color(&app.history.cache_pct), |v| format!("{v:.2}"));
-    render_card(frame, cols[3], app, "latency p95 (est.)", &app.history.p95, "ms", p95_color(&app.history.p95), |v| format!("{v:.0}"));
+    render_card(frame, cols[1], app, "latency p95 (est.)", &app.history.p95, "ms", p95_color(&app.history.p95), |v| format!("{v:.0}"));
+
+    let conn_last = app.history.conn.back().copied().unwrap_or(0.0);
+    draw_meter(frame, cols[2], "connections", conn_last, max_conn as f64, &format!(" /{max_conn}"), conn_color(&app.history.conn, max_conn), app.ascii);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_meter(frame: &mut Frame, area: Rect, label: &str, value: f64, max: f64, unit: &str, color: Color, ascii: bool) {
+    let pct = if max > 0.0 { (value / max * 100.0).clamp(0.0, 100.0) } else { 0.0 };
+    let line = Line::from(vec![
+        Span::styled(format!("{label:<11}"), Style::default().fg(theme::TEXT_DIMMER)),
+        Span::styled(charts::bar(pct, 10, ascii), Style::default().fg(color)),
+        Span::raw(" "),
+        Span::styled(format!("{value:.0}{unit}"), Style::default().fg(color)),
+    ]);
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)).style(Style::default().bg(theme::PANEL_BG));
+    frame.render_widget(Paragraph::new(line).block(block), area);
 }
 
 fn conn_color(hist: &VecDeque<f64>, max_conn: i32) -> Color {
@@ -100,11 +118,6 @@ fn conn_color(hist: &VecDeque<f64>, max_conn: i32) -> Color {
     }
     let ratio = hist.back().copied().unwrap_or(0.0) / max_conn as f64;
     if ratio > 0.85 { theme::BAD } else if ratio > 0.7 { theme::WARN } else { theme::TEXT }
-}
-
-fn cache_color(hist: &VecDeque<f64>) -> Color {
-    let last = hist.back().copied().unwrap_or(100.0);
-    if last < 98.0 { theme::WARN } else { theme::OK }
 }
 
 fn p95_color(hist: &VecDeque<f64>) -> Color {
@@ -144,36 +157,6 @@ fn render_card(
         Line::styled(spark, Style::default().fg(color)),
     ];
     let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)).style(Style::default().bg(theme::PANEL_BG));
-    frame.render_widget(Paragraph::new(lines).block(block), area);
-}
-
-fn draw_throughput(frame: &mut Frame, area: Rect, app: &App) {
-    let hist: Vec<f64> = app.history.tps.iter().copied().collect();
-    let width = area.width.saturating_sub(9).max(1) as usize;
-    let height = area.height.saturating_sub(2).max(1) as usize;
-    let (rows, hi) = charts::area_chart(&hist, height, width, app.ascii);
-
-    let lines: Vec<Line> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let label = if i == 0 {
-                format!("{hi:>6.0} ")
-            } else if i == rows.len() / 2 {
-                format!("{:>6.0} ", hi / 2.0)
-            } else {
-                "       ".to_string()
-            };
-            Line::from(vec![
-                Span::styled(label, Style::default().fg(theme::TEXT_DIMMEST)),
-                Span::styled(row.clone(), Style::default().fg(theme::OK)),
-            ])
-        })
-        .collect();
-
-    let rollback = app.rollback_pct.map(|p| format!(" · rollback {p:.1}%")).unwrap_or_default();
-    let title = format!("Throughput · commits/s{rollback}");
-    let block = theme::block(title);
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -229,34 +212,190 @@ fn draw_top_statements(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(table, area);
 }
 
-fn draw_alerts(frame: &mut Frame, area: Rect, app: &App) {
-    let inputs = build_inputs(app);
-    let alerts = diagnosis::alerts(&inputs);
-
-    let lines: Vec<Line> = if alerts.is_empty() {
-        vec![Line::from("nothing needs attention right now")]
-    } else {
-        alerts
-            .iter()
-            .flat_map(|a| {
-                let (mark, color) = match a.severity {
-                    Severity::Bad => ("!", theme::BAD),
-                    Severity::Warn => ("·", theme::WARN),
-                };
-                [
-                    Line::from(vec![
-                        Span::styled(format!("{mark} "), Style::default().fg(color)),
-                        Span::styled(a.text.clone(), Style::default().fg(theme::TEXT_DIM)),
-                    ]),
-                    Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(a.hint.clone(), Style::default().fg(theme::TEXT_DIMMEST)),
-                    ]),
-                ]
-            })
-            .collect()
+fn draw_cache_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let Some((cache, _)) = &app.cache_overall else {
+        widgets::loading_or_error(frame, area, app, "cache overview", "Buffer Cache");
+        return;
     };
 
-    let block = theme::block("Needs Attention");
+    let hit = cache.hit_ratio_pct;
+    let color = match hit {
+        Some(p) if p < 98.0 => theme::WARN,
+        Some(_) => theme::OK,
+        None => theme::TEXT_DIM,
+    };
+    let cache_hist: Vec<f64> = app.history.cache_pct.iter().copied().collect();
+    let spark = charts::sparkline(&cache_hist, 72, app.ascii);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("Buffer cache hit ratio: "),
+            Span::styled(fmt_pct(hit), Style::default().fg(color)),
+            Span::raw("  (target >= 99%)"),
+        ]),
+        Line::from(Span::styled(spark, Style::default().fg(color))),
+        Line::from(""),
+        Line::from(format!("blocks hit:  {}", cache.blks_hit)),
+        Line::from(format!("blocks read: {}", cache.blks_read)),
+        Line::from(format!("temp files:  {} ({})", cache.temp_files, human_bytes(cache.temp_bytes))),
+    ];
+    if let Some(pct) = app.rollback_pct {
+        lines.push(Line::from(format!("rollback share of throughput: {pct:.1}%")));
+    }
+
+    let block = theme::block("Buffer Cache");
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_per_database(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(per_database) = &app.cache_per_database else {
+        widgets::loading_or_error(frame, area, app, "per-database cache", "Per Database");
+        return;
+    };
+
+    let header = Row::new(vec!["database", "hit ratio"]).style(Style::default().fg(theme::TEXT_DIMMEST));
+    let rows = per_database.iter().map(|db| {
+        let color = match db.hit_ratio_pct {
+            Some(p) if p < 90.0 => theme::WARN,
+            Some(_) => theme::OK,
+            None => theme::TEXT_DIM,
+        };
+        Row::new(vec![
+            Cell::from(db.datname.clone()),
+            Cell::from(fmt_pct(db.hit_ratio_pct)).style(Style::default().fg(color)),
+        ])
+    });
+    let widths = [Constraint::Percentage(60), Constraint::Percentage(40)];
+    let table = Table::new(rows, widths).header(header).block(theme::block("Per Database"));
+    frame.render_widget(table, area);
+}
+
+fn draw_coldest(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(coldest) = &app.cache_coldest else {
+        widgets::loading_or_error(frame, area, app, "coldest relations", "Coldest Relations");
+        return;
+    };
+
+    let header = Row::new(vec!["relation", "hit ratio", "hits/reads", "size"]).style(Style::default().fg(theme::TEXT_DIMMEST));
+    let rows = coldest.iter().map(|r| {
+        let color = match r.hit_ratio_pct {
+            Some(p) if p < 85.0 => theme::BAD,
+            Some(p) if p < 98.0 => theme::WARN,
+            _ => theme::OK,
+        };
+        let bar = charts::bar(r.hit_ratio_pct.unwrap_or(0.0), 10, false);
+        Row::new(vec![
+            Cell::from(format!("{}.{}", r.schema_name, r.table_name)),
+            Cell::from(format!("{bar} {}", fmt_pct(r.hit_ratio_pct))).style(Style::default().fg(color)),
+            Cell::from(format!("{}/{}", r.heap_blks_hit, r.heap_blks_read)),
+            Cell::from(human_bytes(r.size_bytes)),
+        ])
+    });
+
+    let widths = [
+        Constraint::Percentage(35),
+        Constraint::Percentage(30),
+        Constraint::Percentage(20),
+        Constraint::Percentage(15),
+    ];
+    let table = Table::new(rows, widths).header(header).block(theme::block("Coldest Relations · lowest cache hit"));
+    frame.render_widget(table, area);
+}
+
+fn draw_checkpoints(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(bg) = &app.cache_checkpoints else {
+        widgets::loading_or_error(frame, area, app, "checkpoints & wal", "Checkpoints & Buffers");
+        return;
+    };
+
+    let total = bg.checkpoints_timed + bg.checkpoints_req;
+    let req_pct = if total > 0 { bg.checkpoints_req as f64 / total as f64 * 100.0 } else { 0.0 };
+    let checkpoints_color = if bg.checkpoints_req > bg.checkpoints_timed { theme::WARN } else { theme::TEXT };
+    let bar = charts::bar(req_pct, 20, app.ascii);
+
+    let backend = bg.buffers_backend.map(|v| v.to_string()).unwrap_or_else(|| "n/a (PG17+)".to_string());
+    let clean_color = if bg.maxwritten_clean > 0 { theme::WARN } else { theme::TEXT };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("checkpoints  ", Style::default().fg(theme::TEXT_DIMMER)),
+            Span::styled(bar, Style::default().fg(checkpoints_color)),
+            Span::styled(format!("  {} timed / {} requested", bg.checkpoints_timed, bg.checkpoints_req), Style::default().fg(checkpoints_color)),
+        ]),
+        Line::from(""),
+        Line::styled("buffers written", Style::default().fg(theme::TEXT_DIMMER)),
+        Line::from(vec![
+            Span::styled(format!("checkpoint: {}   ", bg.buffers_checkpoint), Style::default().fg(theme::TEXT)),
+            Span::styled(format!("clean: {} (maxwritten {})", bg.buffers_clean, bg.maxwritten_clean), Style::default().fg(clean_color)),
+        ]),
+        Line::styled(format!("backend: {backend}   alloc: {}", bg.buffers_alloc), Style::default().fg(theme::TEXT_DIM)),
+    ];
+
+    frame.render_widget(Paragraph::new(lines).block(theme::block("Checkpoints & Buffers")), area);
+}
+
+fn draw_replication(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(replication) = &app.cache_replication else {
+        widgets::loading_or_error(frame, area, app, "replication", "Replication");
+        return;
+    };
+
+    let text = if replication.is_empty() {
+        "no replicas".to_string()
+    } else {
+        replication
+            .iter()
+            .map(|r| format!("{}: {}", r.application_name, r.lag_bytes.map(human_bytes).unwrap_or_else(|| "?".to_string())))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let block = theme::block("Replication");
+    frame.render_widget(Paragraph::new(text).style(Style::default().fg(theme::TEXT)).block(block), area);
+}
+
+/// Full-screen diagnosis overlay — headline + ranked suspects + a short list
+/// of fix hints (reusing `alerts()`'s `.hint` text rather than adding new
+/// fields to `diagnosis.rs`). Opened with `g`, closed with `g`/`esc`/`q`.
+/// Takes the already-computed `Diagnosis`/`Alert`s rather than `&App` since
+/// `ui/mod.rs` computes both exactly once per frame.
+pub fn draw_diagnosis_modal(frame: &mut Frame, diag: &diagnosis::Diagnosis, alerts: &[diagnosis::Alert]) {
+    let area = frame.area();
+    frame.render_widget(ratatui::widgets::Clear, area);
+
+    let mut lines = vec![Line::styled(diag.headline.clone(), Style::default().fg(theme::TEXT_BRIGHT)), Line::raw("")];
+    for s in &diag.suspects {
+        let color = severity_color(s.severity);
+        lines.push(Line::from(vec![
+            Span::styled(format!("{}. ", s.rank), Style::default().fg(color)),
+            Span::styled(format!("{:<22}", s.kind), Style::default().fg(theme::TEXT)),
+            Span::styled(s.text.clone(), Style::default().fg(theme::TEXT_DIM)),
+            Span::raw("  "),
+            Span::styled(s.evidence.clone(), Style::default().fg(theme::TEXT_DIMMEST)),
+        ]));
+    }
+    if diag.suspects.is_empty() {
+        lines.push(Line::from("no issues detected"));
+    }
+
+    if !alerts.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("Fixes", Style::default().fg(theme::TEXT_DIM)));
+        for a in alerts.iter().take(5) {
+            let color = severity_color(a.severity);
+            lines.push(Line::from(vec![
+                Span::styled("  · ", Style::default().fg(color)),
+                Span::styled(a.text.clone(), Style::default().fg(theme::TEXT_DIM)),
+                Span::raw(" — "),
+                Span::styled(a.hint.clone(), Style::default().fg(theme::TEXT_DIMMEST)),
+            ]));
+        }
+    }
+
+    let block = Block::default()
+        .title("Diagnose  (g / esc / q to close)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER_DETAIL))
+        .style(Style::default().bg(theme::PANEL_BG));
+    frame.render_widget(Paragraph::new(lines).block(block).wrap(ratatui::widgets::Wrap { trim: false }), area);
 }

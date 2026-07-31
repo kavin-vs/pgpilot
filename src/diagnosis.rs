@@ -237,7 +237,7 @@ pub fn alerts(inputs: &DiagnosisInputs) -> Vec<Alert> {
         alerts.push(Alert {
             severity: Severity::Warn,
             text: format!("buffer cache hit ratio {:.1}%", cache.hit_ratio_pct.unwrap_or(0.0)),
-            hint: "below the usual >=99% target — see Cache & I/O".to_string(),
+            hint: "below the usual >=99% target — see Overview".to_string(),
         });
     }
 

@@ -101,18 +101,17 @@ pgpilot --ascii            # plain-ASCII glyphs
 
 | Key | Tab | What's in it |
 |---|---|---|
-| `1` | Overview | A "diagnosis" strip ranking the top suspects behind current db load, 4 stat cards (transactions/s, connections, cache hit%, estimated p95 latency) with sparklines, a throughput chart, a wait-event breakdown, the slowest statements, and a "needs attention" alert list |
+| `1` | Overview | Stat cards for transactions/s and estimated p95 latency (both with sparklines) and a compact connections meter, the slowest statements, and a wait-event breakdown; below that, buffer cache hit ratio + sparkline, per-database cache hit, coldest relations (lowest cache hit), checkpoints & buffers, and replication stats. A tab-bar badge shows whether anything needs attention; `g` opens a full "diagnosis" popup ranking the top suspects behind current db load plus suggested fixes |
 | `2` | Queries | `pg_stat_statements`-backed table (total/mean/stddev time, calls, cache hit), sortable, with a detail pane for the selected statement. Shows a clear "extension not loaded" notice instead of erroring if `pg_stat_statements` isn't installed — everything else in pgpilot works without it |
 | `3` | Activity | Connection-state summary cards, the full `pg_stat_activity` list (selectable), a blocking tree, and a lock/transaction summary |
-| `4` | Cache & I/O | Buffer cache hit ratio + sparkline, per-database cache hit, coldest relations (lowest cache hit), and checkpoints/WAL/replication stats |
-| `5` | Tables & Indexes | Schema size totals, a table list (dead-tuple %, xid age, seq-scans/hour, last autovacuum), unused/invalid indexes (with reclaimable size), and missing-index candidates (unindexed foreign keys, high seq-scan-ratio tables) |
-| `6` | Triggers | Every user-defined trigger (`pg_trigger`, excluding internal foreign-key-backing ones) — schema, table, function, enabled/disabled state; `enter` on a selected row opens a full-screen popup with that trigger's function source (`pg_get_functiondef`) |
+| `4` | Tables & Indexes | Schema size totals, a table list (dead-tuple %, xid age, seq-scans/hour, last autovacuum), unused/invalid indexes (with reclaimable size), and missing-index candidates (unindexed foreign keys, high seq-scan-ratio tables) |
+| `5` | Triggers | Every user-defined trigger (`pg_trigger`, excluding internal foreign-key-backing ones) — schema, table, function, enabled/disabled state; `enter` on a selected row opens a full-screen popup with that trigger's function source (`pg_get_functiondef`) |
 
 ### Keys
 
 | Key | Action |
 |---|---|
-| `1`–`6` | Switch tab |
+| `1`–`5` | Switch tab |
 | `↑`/`↓` or `j`/`k` | Scroll/select rows on the current tab (Queries, Activity, Tables & Indexes, Triggers) |
 | `s` | Cycle sort (Queries: total time → mean time → calls; Tables & Indexes: size/name, press again to reverse) |
 | `x` / `X` | Cancel / terminate the selected Activity row's backend (`pg_cancel_backend`/`pg_terminate_backend`) — real, immediate, no confirmation prompt, same spirit as `htop`'s kill. Requires the `pg_signal_backend` role (or superuser); otherwise the attempt fails with a status message, not a crash |
@@ -120,6 +119,7 @@ pgpilot --ascii            # plain-ASCII glyphs
 | `-` / `+` | Slow down / speed up the fast-tier poll rate |
 | `r` | Force an immediate refresh, without waiting for the next poll tick (works even while paused) |
 | `d` | Open a full-screen database picker (owner, size, sessions, tps, cache hit, state); `enter` reconnects to the selected one (same host/user/SSL, just a different `dbname`), `esc`/`q`/`d` closes it without switching |
+| `g` | Open the diagnosis popup (headline, ranked suspects, suggested fixes). `g`/`esc`/`q` closes it |
 | `enter` | On the Triggers tab, with a row selected: open a full-screen popup showing that trigger's function source. `enter`/`esc`/`q` closes it |
 | `e` | View the full text of the current error(s) — only active when the footer shows a red error, since the footer's single line truncates long Postgres error messages. `e`/`esc`/`q` closes it |
 | `q` | Quit |
@@ -128,7 +128,7 @@ pgpilot --ascii            # plain-ASCII glyphs
 
 If a query fails (a permission issue, a Postgres-version-specific column, etc.), only *that block* shows it — a red `✗` in its title and its error inline — while every other block on every other tab keeps updating normally, since each one is fetched and reported independently. If the connection itself drops, every block shows the error and the last-known-good data stays on screen (stale but visible) until the background poller reconnects automatically on the next tick. Switching databases works the same way under the hood — a fresh connection is opened before the old one is dropped, and every tab shows its loading spinner again until the first snapshot from the new database arrives.
 
-Tested against Postgres 13 through 17 — the Cache & I/O tab's checkpoint/WAL stats automatically use the right system view for the connected server's version (Postgres 17 moved those columns from `pg_stat_bgwriter` to a new `pg_stat_checkpointer` view).
+Tested against Postgres 13 through 17 — Overview's checkpoint/buffer stats automatically use the right system view for the connected server's version (Postgres 17 moved those columns from `pg_stat_bgwriter` to a new `pg_stat_checkpointer` view).
 
 Polling is tiered, not one-size-fits-all: counters/activity refresh at the `--interval`/`-`/`+`-controlled rate, `pg_stat_statements` every 15s, and catalog-heavy data (dead tuples, xid age, unindexed FKs, triggers) every 5 minutes — polling everything at sub-second rates would make the monitor itself a load problem.
 
@@ -136,6 +136,6 @@ A small spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) shows up in two places: on th
 
 ## Scope
 
-In: the five tabs above, saved connection profiles (list/add/edit/pick, SSL/mutual-TLS), the database picker, cancel/terminate.
+In: the five tabs above, the diagnosis popup, saved connection profiles (list/add/edit/pick, SSL/mutual-TLS), the database picker, cancel/terminate.
 
 Out of scope (candidates for future versions): deleting a saved profile in place (listing, adding, and editing are all supported), true time-windowed wait-event profiling (current sampling is a cumulative-since-session-start count, not `pg_wait_sampling`-grade), and query-plan-derived index suggestions (missing-index candidates are limited to two mechanically-derivable heuristics — unindexed foreign keys and high seq-scan-ratio tables — not fabricated column-level `CREATE INDEX` guesses).

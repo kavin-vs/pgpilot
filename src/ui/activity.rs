@@ -110,8 +110,44 @@ fn draw_activity_table(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(theme::block("pg_stat_activity  (x: cancel · X: terminate backend)"));
+        .block(theme::block("pg_stat_activity  (enter: view full query · x: cancel · X: terminate backend)"));
     frame.render_stateful_widget(table, area, &mut app.activity_state);
+}
+
+/// Full-screen overlay showing the selected backend's full query text —
+/// same `Clear`+bordered-`Paragraph`+`Wrap` shape as
+/// `triggers::draw_detail_popup`. Opened with `enter` (only reachable with a
+/// row selected, see `main.rs::handle_key`), closed with `enter`/`esc`/`q`.
+pub fn draw_detail_popup(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    frame.render_widget(ratatui::widgets::Clear, area);
+
+    let Some(row) = app.selected_activity_row() else {
+        return;
+    };
+
+    let text = row.query.clone().unwrap_or_else(|| "(no query text)".to_string());
+    let lines: Vec<Line> = text.lines().map(|l| Line::from(l.to_string())).collect();
+
+    let wait = match (&row.wait_event_type, &row.wait_event) {
+        (Some(t), Some(e)) => format!("{t}:{e}"),
+        _ => "—".to_string(),
+    };
+    let dur = row.duration_secs.map(human_duration).unwrap_or_default();
+
+    let block = Block::default()
+        .title(format!(
+            "pid {}  user {}  state {}  duration {dur}  wait {wait}  (enter / esc / q to close)",
+            row.pid,
+            row.username.as_deref().unwrap_or("—"),
+            row.state.as_deref().unwrap_or("—"),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER_DETAIL))
+        .style(Style::default().bg(theme::PANEL_BG));
+
+    let widget = Paragraph::new(lines).block(block).wrap(ratatui::widgets::Wrap { trim: false });
+    frame.render_widget(widget, area);
 }
 
 fn draw_blocking_tree(frame: &mut Frame, area: Rect, app: &App) {

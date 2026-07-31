@@ -47,11 +47,11 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let widths = [
         Constraint::Length(2),
-        Constraint::Length(14),
-        Constraint::Length(18),
-        Constraint::Length(20),
-        Constraint::Length(20),
-        Constraint::Length(9),
+        Constraint::Percentage(14),
+        Constraint::Percentage(18),
+        Constraint::Percentage(24),
+        Constraint::Percentage(24),
+        Constraint::Percentage(12),
     ];
 
     let table = Table::new(table_rows, widths)

@@ -1,5 +1,4 @@
 pub mod activity;
-pub mod cache_io;
 pub mod charts;
 pub mod overview;
 pub mod picker;
@@ -15,6 +14,7 @@ use ratatui::{
 };
 
 use crate::app::{App, PanelKind};
+use crate::diagnosis;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
@@ -27,14 +27,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .split(frame.area());
 
+    // Computed once per frame — the owned `Diagnosis`/`Vec<Alert>` results
+    // outlive the `&App` borrow `build_inputs` takes, so they don't fight the
+    // `&mut App` the tab draws below need for their own stateful widgets
+    // (table selection, etc.).
+    let (diag, alerts) = {
+        let inputs = overview::build_inputs(app);
+        (diagnosis::diagnose(&inputs), diagnosis::alerts(&inputs))
+    };
+
     widgets::draw_header(frame, chunks[0], app);
-    widgets::draw_tab_bar(frame, chunks[1], app.active);
+    widgets::draw_tab_bar(frame, chunks[1], app.active, &diag);
 
     match app.active {
         PanelKind::Overview => overview::draw(frame, chunks[2], app),
         PanelKind::Queries => queries::draw(frame, chunks[2], app),
         PanelKind::Activity => activity::draw(frame, chunks[2], app),
-        PanelKind::CacheIo => cache_io::draw(frame, chunks[2], app),
         PanelKind::TablesIndexes => tables_indexes::draw(frame, chunks[2], app),
         PanelKind::Triggers => triggers::draw(frame, chunks[2], app),
     }
@@ -51,5 +59,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.trigger_detail_open {
         triggers::draw_detail_popup(frame, app);
+    }
+
+    if app.activity_detail_open {
+        activity::draw_detail_popup(frame, app);
+    }
+
+    if app.diagnosis_open {
+        overview::draw_diagnosis_modal(frame, &diag, &alerts);
     }
 }

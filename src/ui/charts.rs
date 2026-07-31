@@ -97,40 +97,6 @@ pub fn bar(pct: f64, width: usize, ascii: bool) -> String {
     s
 }
 
-/// Multi-row block-ramp area chart (top row first) over the last `width`
-/// values, plus the scale ceiling used (12% headroom above the peak, matching
-/// the mockup) so callers can label the y-axis.
-pub fn area_chart(values: &[f64], height: usize, width: usize, ascii: bool) -> (Vec<String>, f64) {
-    if values.is_empty() || height == 0 || width == 0 {
-        return (vec![String::new(); height], 1.0);
-    }
-    let ramp = ramp(ascii);
-    let g = glyphs(ascii);
-    let start = values.len().saturating_sub(width);
-    let slice = &values[start..];
-    let peak = slice.iter().cloned().fold(f64::MIN, f64::max);
-    let hi = if peak <= 0.0 { 1.0 } else { peak * 1.12 };
-
-    let mut rows = Vec::with_capacity(height);
-    for r in (0..height).rev() {
-        let mut line = String::with_capacity(slice.len());
-        for &v in slice {
-            let c = v / hi * height as f64 - r as f64;
-            let ch = if c >= 1.0 {
-                g.full
-            } else if c > 0.0 {
-                let idx = (((c * 8.0).ceil() as isize - 1).max(0) as usize).min(7);
-                ramp[idx]
-            } else {
-                ' '
-            };
-            line.push(ch);
-        }
-        rows.push(line);
-    }
-    (rows, hi)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

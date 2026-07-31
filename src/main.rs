@@ -294,6 +294,20 @@ fn handle_key(app: &mut App, code: KeyCode, refresh_now: &Arc<Notify>, control_t
         return;
     }
 
+    if app.activity_detail_open {
+        if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
+            app.activity_detail_open = false;
+        }
+        return;
+    }
+
+    if app.diagnosis_open {
+        if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('g')) {
+            app.diagnosis_open = false;
+        }
+        return;
+    }
+
     if app.db_popup.is_some() {
         match code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => app.close_db_popup(),
@@ -319,13 +333,16 @@ fn handle_key(app: &mut App, code: KeyCode, refresh_now: &Arc<Notify>, control_t
         KeyCode::Char('1') => app.active = PanelKind::Overview,
         KeyCode::Char('2') => app.active = PanelKind::Queries,
         KeyCode::Char('3') => app.active = PanelKind::Activity,
-        KeyCode::Char('4') => app.active = PanelKind::CacheIo,
-        KeyCode::Char('5') => app.active = PanelKind::TablesIndexes,
-        KeyCode::Char('6') => app.active = PanelKind::Triggers,
+        KeyCode::Char('4') => app.active = PanelKind::TablesIndexes,
+        KeyCode::Char('5') => app.active = PanelKind::Triggers,
         KeyCode::Char('d') => app.open_db_popup(),
         KeyCode::Char('e') if !app.errors.is_empty() => app.error_detail_open = true,
+        KeyCode::Char('g') => app.diagnosis_open = true,
         KeyCode::Enter if app.active == PanelKind::Triggers && app.selected_trigger().is_some() => {
             app.trigger_detail_open = true;
+        }
+        KeyCode::Enter if app.active == PanelKind::Activity && app.selected_activity_row().is_some() => {
+            app.activity_detail_open = true;
         }
         KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
         KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),

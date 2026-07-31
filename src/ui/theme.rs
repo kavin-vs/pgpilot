@@ -1,6 +1,8 @@
-//! Color palette for the dark green/terminal theme, ported from the
+//! Color palette for the monochrome grey/white theme, ported from the
 //! `Postgres Monitor TUI` design mockup (claude.ai/design project
-//! `ce4aac14-ae5c-4fda-9e54-dfd87abae33a`).
+//! `ce4aac14-ae5c-4fda-9e54-dfd87abae33a`) after its post-v2 revision toward
+//! a more concise look — grey/white throughout, with green/amber/red used
+//! only for ok/warn/bad semantic states, not as the base theme color.
 
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -8,26 +10,24 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 
-pub const BG: Color = Color::Rgb(0x00, 0x00, 0x00);
-pub const PANEL_BG: Color = Color::Rgb(0x00, 0x00, 0x00);
-pub const PANEL_BG_ALT: Color = Color::Rgb(0x00, 0x00, 0x00);
+pub const BG: Color = Color::Rgb(0x0a, 0x0b, 0x0a);
+pub const PANEL_BG: Color = BG;
+pub const PANEL_BG_ALT: Color = BG;
 
-pub const BORDER: Color = Color::Rgb(0x20, 0x2a, 0x24);
-pub const BORDER_DIAGNOSIS: Color = Color::Rgb(0x33, 0x45, 0x2f);
-pub const BORDER_DETAIL: Color = Color::Rgb(0x2b, 0x3a, 0x2f);
-pub const BORDER_WARN: Color = Color::Rgb(0x4a, 0x3a, 0x2c);
+pub const BORDER: Color = Color::Rgb(0x23, 0x25, 0x23);
+pub const BORDER_DETAIL: Color = Color::Rgb(0x3a, 0x3d, 0x3a);
 
-pub const TEXT_BRIGHT: Color = Color::Rgb(0xe6, 0xef, 0xe9);
-pub const TEXT: Color = Color::Rgb(0xc3, 0xcf, 0xc7);
-pub const TEXT_DIM: Color = Color::Rgb(0x8b, 0x9a, 0x90);
-pub const TEXT_DIMMER: Color = Color::Rgb(0x6b, 0x7a, 0x71);
-pub const TEXT_DIMMEST: Color = Color::Rgb(0x4e, 0x5c, 0x53);
+pub const TEXT_BRIGHT: Color = Color::Rgb(0xff, 0xff, 0xff);
+pub const TEXT: Color = Color::Rgb(0xd6, 0xd8, 0xd6);
+pub const TEXT_DIM: Color = Color::Rgb(0x7a, 0x7d, 0x7a);
+pub const TEXT_DIMMER: Color = Color::Rgb(0x5c, 0x5f, 0x5c);
+pub const TEXT_DIMMEST: Color = Color::Rgb(0x4a, 0x4d, 0x4a);
 
-pub const OK: Color = Color::Rgb(0x8f, 0xe3, 0x9f);
-pub const WARN: Color = Color::Rgb(0xe3, 0xc9, 0x8f);
-pub const BAD: Color = Color::Rgb(0xe3, 0x9f, 0x8f);
+pub const OK: Color = Color::Rgb(0x7f, 0xa0, 0x6f);
+pub const WARN: Color = Color::Rgb(0xc1, 0xa0, 0x5a);
+pub const BAD: Color = Color::Rgb(0xbd, 0x74, 0x66);
 
-pub const ROW_SELECTED_BG: Color = Color::Rgb(0x16, 0x21, 0x1a);
+pub const ROW_SELECTED_BG: Color = BORDER;
 
 /// Standard bordered panel block with a visible title — `Block::title()` with a
 /// plain string otherwise inherits `border_style`'s color, and `BORDER` is too

@@ -135,9 +135,9 @@ const REPLICATION_QUERY: &str = "
     FROM pg_stat_replication
 ";
 
-/// Each block on the Cache & I/O tab is fetched (and can fail) independently
-/// — one broken query shouldn't blank out the other three, and each block
-/// shows its own error state rather than the whole tab going dark.
+/// Each of these blocks (rendered on Overview) is fetched (and can fail)
+/// independently — one broken query shouldn't blank out the other three,
+/// and each block shows its own error state rather than the whole tab going dark.
 pub async fn fetch_overall(client: &Client) -> Result<CacheOverall> {
     let row = client.query_one(OVERALL_QUERY, &[]).await?;
     Ok(CacheOverall {

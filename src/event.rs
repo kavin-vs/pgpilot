@@ -9,10 +9,10 @@ use crate::db::tables::TablesData;
 use crate::db::triggers::TriggerRow;
 
 /// One variant per independently-fetched, independently-failable block —
-/// each Cache & I/O block in particular used to be one bundled fetch where
-/// any single query failing blanked out the other three; splitting them
-/// (matching each block rendered in `ui/cache_io.rs`) means every block
-/// shows its own error state instead.
+/// the cache/checkpoint blocks in particular used to be one bundled fetch
+/// where any single query failing blanked out the other three; splitting
+/// them (matching each block rendered on Overview) means every block shows
+/// its own error state instead.
 pub enum PanelSnapshot {
     Connections(ConnectionsData),
     CacheOverall(CacheOverall),

@@ -112,8 +112,8 @@ async fn send_labeled(tx: &mpsc::Sender<AppEvent>, label: &str, result: Result<P
 /// Counters/activity — the only tier the `-`/`+` rate keys touch. Each of
 /// the 9 queries is sent independently: one failing (e.g. a version-specific
 /// column missing) no longer blocks the others from updating, which used to
-/// leave the whole dashboard (or, for the 4 Cache & I/O queries, the whole
-/// tab) looking dead over one broken query. `pg17_plus` picks the right
+/// leave the whole dashboard (or, for the 4 cache/checkpoint queries, that
+/// whole block-set) looking dead over one broken query. `pg17_plus` picks the right
 /// checkpointer query (see `cache_io::fetch_bgwriter`).
 async fn send_fast(client: &Client, tx: &mpsc::Sender<AppEvent>, pg17_plus: bool) -> (bool, bool) {
     let results: [(&str, Result<PanelSnapshot>); 9] = [
@@ -324,6 +324,23 @@ pub async fn poll_task(
                                             return;
                                         }
                                     }
+                                    // Without this, medium/slow tier fields
+                                    // (pg_stat_statements, tables, unindexed
+                                    // FKs, triggers) sit at None — wiped by
+                                    // on_db_switched() — until whatever's
+                                    // left of the *previous* db's 15s/5min
+                                    // ticker window happens to elapse, which
+                                    // reads as a stuck "loading" state.
+                                    if !send_medium(&client, &tx, has_pg_stat_statements).await {
+                                        return;
+                                    }
+                                    if !send_slow(&client, &tx).await {
+                                        return;
+                                    }
+                                    medium_ticker = tokio::time::interval(MEDIUM_INTERVAL);
+                                    medium_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                                    slow_ticker = tokio::time::interval(SLOW_INTERVAL);
+                                    slow_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
                                 }
                                 Err(e) => {
                                     if tx

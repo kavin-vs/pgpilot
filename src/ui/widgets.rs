@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use crate::app::{App, PanelKind};
+use crate::diagnosis::{self, Severity};
 use crate::event::StatusLevel;
 use crate::format::{human_bytes, human_duration, human_rate};
 use crate::ui::{charts, theme};
@@ -112,7 +113,7 @@ pub fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(widget, area);
 }
 
-pub fn draw_tab_bar(frame: &mut Frame, area: Rect, active: PanelKind) {
+pub fn draw_tab_bar(frame: &mut Frame, area: Rect, active: PanelKind, diag: &diagnosis::Diagnosis) {
     let titles: Vec<Line> = PanelKind::ALL
         .iter()
         .enumerate()
@@ -127,10 +128,33 @@ pub fn draw_tab_bar(frame: &mut Frame, area: Rect, active: PanelKind) {
         .highlight_style(
             Style::default()
                 .fg(theme::TEXT_BRIGHT)
-                .bg(theme::PANEL_BG)
+                .bg(theme::ROW_SELECTED_BG)
                 .add_modifier(Modifier::BOLD),
         );
     frame.render_widget(tabs, area);
+
+    let (label, color) = if diag.suspects.is_empty() {
+        ("no issues".to_string(), theme::TEXT_DIM)
+    } else {
+        let bad = diag.suspects.iter().any(|s| s.severity == Severity::Bad);
+        let n = diag.suspects.len();
+        (format!("{n} issue{}  (g)", if n == 1 { "" } else { "s" }), if bad { theme::BAD } else { theme::WARN })
+    };
+    // Sized to exactly the label's own width and right-anchored — a
+    // Paragraph fills its *entire* area with its own style even where the
+    // text doesn't reach, so a full-row badge Rect would paint over (and
+    // had been painting over) the Tabs widget's own rendering, including
+    // the selected tab's highlight.
+    let label_width = label.chars().count() as u16;
+    let inner_right = area.x + area.width.saturating_sub(1);
+    let badge_area = Rect {
+        x: inner_right.saturating_sub(label_width),
+        y: area.y + 1,
+        width: label_width.min(area.width),
+        height: 1,
+    };
+    let badge = Paragraph::new(label).style(Style::default().fg(color).bg(theme::PANEL_BG_ALT));
+    frame.render_widget(badge, badge_area);
 }
 
 pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
@@ -147,7 +171,7 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     );
     let has_sort = matches!(app.active, PanelKind::Queries | PanelKind::TablesIndexes);
 
-    let mut help = "q: quit  1-6: view".to_string();
+    let mut help = "q: quit  1-5: view".to_string();
     if has_rows {
         help.push_str("  j/k: move");
     }
@@ -157,9 +181,12 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     if app.active == PanelKind::Activity {
         help.push_str("  x/X: cancel/terminate");
     }
-    help.push_str("  r: refresh  space: pause");
+    help.push_str("  r: refresh  space: pause  g: diagnose");
     if app.active == PanelKind::Triggers {
         help.push_str("  enter: view function");
+    }
+    if app.active == PanelKind::Activity {
+        help.push_str("  enter: view query");
     }
     if app.can_switch_db {
         help.push_str("  d: database");
@@ -216,4 +243,28 @@ pub fn draw_error_detail(frame: &mut Frame, app: &App) {
         .block(block)
         .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(widget, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// The selected tab's title must actually get `ROW_SELECTED_BG` — a
+    /// `Paragraph` fills its whole area with its own style even past its
+    /// text, so a badge `Rect` spanning the full tab-bar row (rather than
+    /// just the label's own width) previously painted back over the Tabs
+    /// widget's highlight right after it was drawn.
+    #[test]
+    fn selected_tab_keeps_highlight_bg_despite_badge() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 3)).unwrap();
+        let diag = diagnosis::Diagnosis { headline: String::new(), suspects: vec![] };
+        terminal.draw(|f| draw_tab_bar(f, f.area(), PanelKind::Overview, &diag)).unwrap();
+        let buf = terminal.backend().buffer();
+        // "[1] Overview" starts just after the left border + 1 space of padding.
+        let cell = &buf[(3, 1)];
+        assert_eq!(cell.symbol(), "1");
+        assert_eq!(cell.bg, theme::ROW_SELECTED_BG);
+        assert_eq!(cell.fg, theme::TEXT_BRIGHT);
+    }
 }

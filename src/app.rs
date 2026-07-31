@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::widgets::TableState;
 
-use crate::db::activity::ActivityData;
+use crate::db::activity::{ActivityData, ActivityRow};
 use crate::db::cache_io::{BgWriterStats, CacheDbRow, CacheOverall, ColdRelation, ReplicationRow};
 use crate::db::connections::ConnectionsData;
 use crate::db::databases::DatabaseRow;
@@ -19,17 +19,15 @@ pub enum PanelKind {
     Overview,
     Queries,
     Activity,
-    CacheIo,
     TablesIndexes,
     Triggers,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 6] = [
+    pub const ALL: [PanelKind; 5] = [
         PanelKind::Overview,
         PanelKind::Queries,
         PanelKind::Activity,
-        PanelKind::CacheIo,
         PanelKind::TablesIndexes,
         PanelKind::Triggers,
     ];
@@ -39,7 +37,6 @@ impl PanelKind {
             PanelKind::Overview => "Overview",
             PanelKind::Queries => "Queries",
             PanelKind::Activity => "Activity",
-            PanelKind::CacheIo => "Cache & I/O",
             PanelKind::TablesIndexes => "Tables & Indexes",
             PanelKind::Triggers => "Triggers",
         }
@@ -145,8 +142,8 @@ pub struct App {
     pub active: PanelKind,
 
     pub connections: Option<ConnectionsData>,
-    /// Cache & I/O's 4 blocks, each independently fetched/failable (see
-    /// `PanelSnapshot::source_label`) — `cache_overall` needs the `Instant`
+    /// Overview's cache/checkpoint blocks, each independently fetched/failable
+    /// (see `PanelSnapshot::source_label`) — `cache_overall` needs the `Instant`
     /// to derive commits/s and rollback% from consecutive-poll deltas.
     pub cache_overall: Option<(CacheOverall, Instant)>,
     pub cache_per_database: Option<Vec<CacheDbRow>>,
@@ -187,6 +184,18 @@ pub struct App {
     /// `error_detail_open`, just keyed off the selected row instead of
     /// `errors`.
     pub trigger_detail_open: bool,
+    /// Toggled by `enter` while an Activity row is selected, to show that
+    /// backend's full, untruncated query text — same shape as
+    /// `trigger_detail_open`, just keyed off the Activity selection instead
+    /// of the Triggers one. The underlying text is still capped at 220 chars
+    /// server-side (see `db::activity`), but the table's own query column is
+    /// usually far narrower than that on a typical terminal width, so this
+    /// still recovers text the table itself can't show.
+    pub activity_detail_open: bool,
+    /// Toggled by `g` to show the diagnosis modal (headline + ranked
+    /// suspects + fix hints) — always openable, unlike the other two
+    /// overlays, since the heuristic runs even with an empty result.
+    pub diagnosis_open: bool,
     /// Transient status-line feedback (sort changed, refreshed, cancel/
     /// terminate result) — distinct from the sticky `errors` banner. The
     /// `Instant` lets the footer expire it back to the help text instead of
@@ -260,6 +269,8 @@ impl App {
             errors: BTreeMap::new(),
             error_detail_open: false,
             trigger_detail_open: false,
+            activity_detail_open: false,
+            diagnosis_open: false,
             status: None,
             last_refresh: None,
             should_quit: false,
@@ -424,6 +435,10 @@ impl App {
         self.activity.as_ref()?.rows.get(idx).map(|r| r.pid)
     }
 
+    pub fn selected_activity_row(&self) -> Option<&ActivityRow> {
+        self.activity.as_ref()?.rows.get(self.activity_state.selected()?)
+    }
+
     pub fn selected_trigger(&self) -> Option<&TriggerRow> {
         self.triggers.as_ref()?.get(self.triggers_state.selected()?)
     }
@@ -554,6 +569,8 @@ impl App {
         self.errors.clear();
         self.error_detail_open = false;
         self.trigger_detail_open = false;
+        self.activity_detail_open = false;
+        self.diagnosis_open = false;
         self.tables_state = TableState::default();
         self.queries_state = TableState::default();
         self.activity_state = TableState::default();

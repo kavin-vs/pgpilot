@@ -49,7 +49,7 @@ fn draw_not_available(frame: &mut Frame, area: Rect) {
         Line::from("Meanwhile: Activity shows what's running now, Tables & Indexes finds seq"),
         Line::from("scans and unindexed foreign keys from catalog statistics alone."),
     ];
-    let block = theme::block("Queries").border_style(Style::default().fg(theme::BORDER_WARN));
+    let block = theme::block("Queries").border_style(Style::default().fg(theme::BORDER_DETAIL));
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 

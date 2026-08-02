@@ -1,5 +1,5 @@
 use crate::db::activity::ActivityData;
-use crate::db::cache_io::{BgWriterStats, CacheDbRow, CacheOverall, ColdRelation, ReplicationRow};
+use crate::db::cache_io::{BgWriterStats, CacheOverall, ColdRelation, ReplicationRow};
 use crate::db::connections::ConnectionsData;
 use crate::db::databases::DatabaseRow;
 use crate::db::indexes::{IndexRow, UnindexedForeignKey};
@@ -16,7 +16,6 @@ use crate::db::triggers::TriggerRow;
 pub enum PanelSnapshot {
     Connections(ConnectionsData),
     CacheOverall(CacheOverall),
-    CachePerDatabase(Vec<CacheDbRow>),
     CacheColdest(Vec<ColdRelation>),
     CacheCheckpoints(BgWriterStats),
     CacheReplication(Vec<ReplicationRow>),
@@ -38,7 +37,6 @@ impl PanelSnapshot {
         match self {
             PanelSnapshot::Connections(_) => "connections",
             PanelSnapshot::CacheOverall(_) => "cache overview",
-            PanelSnapshot::CachePerDatabase(_) => "per-database cache",
             PanelSnapshot::CacheColdest(_) => "coldest relations",
             PanelSnapshot::CacheCheckpoints(_) => "checkpoints & wal",
             PanelSnapshot::CacheReplication(_) => "replication",

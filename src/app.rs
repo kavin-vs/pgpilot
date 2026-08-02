@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use ratatui::widgets::TableState;
 
 use crate::db::activity::{ActivityData, ActivityRow};
-use crate::db::cache_io::{BgWriterStats, CacheDbRow, CacheOverall, ColdRelation, ReplicationRow};
+use crate::db::cache_io::{BgWriterStats, CacheOverall, ColdRelation, ReplicationRow};
 use crate::db::connections::ConnectionsData;
 use crate::db::databases::DatabaseRow;
 use crate::db::indexes::{IndexRow, UnindexedForeignKey};
@@ -85,6 +85,7 @@ pub enum QueriesSortColumn {
     Total,
     Mean,
     Calls,
+    Io,
 }
 
 impl QueriesSortColumn {
@@ -92,7 +93,8 @@ impl QueriesSortColumn {
         match self {
             QueriesSortColumn::Total => QueriesSortColumn::Mean,
             QueriesSortColumn::Mean => QueriesSortColumn::Calls,
-            QueriesSortColumn::Calls => QueriesSortColumn::Total,
+            QueriesSortColumn::Calls => QueriesSortColumn::Io,
+            QueriesSortColumn::Io => QueriesSortColumn::Total,
         }
     }
 
@@ -101,6 +103,7 @@ impl QueriesSortColumn {
             QueriesSortColumn::Total => "total time",
             QueriesSortColumn::Mean => "mean time",
             QueriesSortColumn::Calls => "calls",
+            QueriesSortColumn::Io => "disk I/O",
         }
     }
 }
@@ -146,7 +149,6 @@ pub struct App {
     /// (see `PanelSnapshot::source_label`) — `cache_overall` needs the `Instant`
     /// to derive commits/s and rollback% from consecutive-poll deltas.
     pub cache_overall: Option<(CacheOverall, Instant)>,
-    pub cache_per_database: Option<Vec<CacheDbRow>>,
     pub cache_coldest: Option<Vec<ColdRelation>>,
     pub cache_checkpoints: Option<BgWriterStats>,
     pub cache_replication: Option<Vec<ReplicationRow>>,
@@ -249,7 +251,6 @@ impl App {
             active: PanelKind::Overview,
             connections: None,
             cache_overall: None,
-            cache_per_database: None,
             cache_coldest: None,
             cache_checkpoints: None,
             cache_replication: None,
@@ -383,6 +384,10 @@ impl App {
             QueriesSortColumn::Total => rows.sort_by(|a, b| b.total_exec_time_ms.total_cmp(&a.total_exec_time_ms)),
             QueriesSortColumn::Mean => rows.sort_by(|a, b| b.mean_exec_time_ms.total_cmp(&a.mean_exec_time_ms)),
             QueriesSortColumn::Calls => rows.sort_by_key(|r| std::cmp::Reverse(r.calls)),
+            // ponytail: sorts on block counts, not `io_time_ms` — blocks are always
+            // populated, timing is 0 unless `track_io_timing = on`. Switch the key to
+            // time (falling back to blocks) if the timing-off case stops mattering.
+            QueriesSortColumn::Io => rows.sort_by_key(|r| std::cmp::Reverse(r.io_blocks())),
         }
     }
 
@@ -551,7 +556,6 @@ impl App {
         self.current_dbname = Some(name);
         self.connections = None;
         self.cache_overall = None;
-        self.cache_per_database = None;
         self.cache_coldest = None;
         self.cache_checkpoints = None;
         self.cache_replication = None;

@@ -45,11 +45,10 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
 
     let cache = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(34), Constraint::Percentage(33), Constraint::Percentage(33)])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(rest[1]);
     draw_cache_detail(frame, cache[0], app);
-    draw_per_database(frame, cache[1], app);
-    draw_coldest(frame, cache[2], app);
+    draw_coldest(frame, cache[1], app);
 
     let checkpoints = Layout::default()
         .direction(Direction::Horizontal)
@@ -245,29 +244,6 @@ fn draw_cache_detail(frame: &mut Frame, area: Rect, app: &App) {
 
     let block = theme::block("Buffer Cache");
     frame.render_widget(Paragraph::new(lines).block(block), area);
-}
-
-fn draw_per_database(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(per_database) = &app.cache_per_database else {
-        widgets::loading_or_error(frame, area, app, "per-database cache", "Per Database");
-        return;
-    };
-
-    let header = Row::new(vec!["database", "hit ratio"]).style(Style::default().fg(theme::TEXT_DIMMEST));
-    let rows = per_database.iter().map(|db| {
-        let color = match db.hit_ratio_pct {
-            Some(p) if p < 90.0 => theme::WARN,
-            Some(_) => theme::OK,
-            None => theme::TEXT_DIM,
-        };
-        Row::new(vec![
-            Cell::from(db.datname.clone()),
-            Cell::from(fmt_pct(db.hit_ratio_pct)).style(Style::default().fg(color)),
-        ])
-    });
-    let widths = [Constraint::Percentage(60), Constraint::Percentage(40)];
-    let table = Table::new(rows, widths).header(header).block(theme::block("Per Database"));
-    frame.render_widget(table, area);
 }
 
 fn draw_coldest(frame: &mut Frame, area: Rect, app: &App) {

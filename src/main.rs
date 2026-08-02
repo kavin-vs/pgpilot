@@ -404,7 +404,6 @@ fn apply_event(app: &mut App, event: AppEvent) {
             match snapshot {
                 PanelSnapshot::Connections(data) => app.record_connections(data),
                 PanelSnapshot::CacheOverall(data) => app.record_cache_overall(data, now),
-                PanelSnapshot::CachePerDatabase(data) => app.cache_per_database = Some(data),
                 PanelSnapshot::CacheColdest(data) => app.cache_coldest = Some(data),
                 PanelSnapshot::CacheCheckpoints(data) => app.cache_checkpoints = Some(data),
                 PanelSnapshot::CacheReplication(data) => app.cache_replication = Some(data),

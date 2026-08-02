@@ -16,12 +16,6 @@ pub struct CacheOverall {
 }
 
 #[derive(Debug, Clone)]
-pub struct CacheDbRow {
-    pub datname: String,
-    pub hit_ratio_pct: Option<f64>,
-}
-
-#[derive(Debug, Clone)]
 pub struct ColdRelation {
     pub schema_name: String,
     pub table_name: String,
@@ -75,17 +69,6 @@ const OVERALL_QUERY: &str = "
         sum(temp_files)::bigint AS temp_files,
         sum(temp_bytes)::bigint AS temp_bytes
     FROM pg_stat_database
-";
-
-const PER_DATABASE_QUERY: &str = "
-    SELECT
-        datname,
-        CASE WHEN blks_hit + blks_read = 0 THEN NULL
-             ELSE (blks_hit::float8 / (blks_hit + blks_read)::float8) * 100.0
-        END AS hit_ratio_pct
-    FROM pg_stat_database
-    WHERE datname IS NOT NULL
-    ORDER BY hit_ratio_pct NULLS LAST
 ";
 
 // Capped at 15 and restricted to relations with actual I/O activity — this
@@ -149,17 +132,6 @@ pub async fn fetch_overall(client: &Client) -> Result<CacheOverall> {
         temp_files: row.get("temp_files"),
         temp_bytes: row.get("temp_bytes"),
     })
-}
-
-pub async fn fetch_per_database(client: &Client) -> Result<Vec<CacheDbRow>> {
-    let rows = client.query(PER_DATABASE_QUERY, &[]).await?;
-    Ok(rows
-        .iter()
-        .map(|row| CacheDbRow {
-            datname: row.get("datname"),
-            hit_ratio_pct: row.get("hit_ratio_pct"),
-        })
-        .collect())
 }
 
 pub async fn fetch_coldest(client: &Client) -> Result<Vec<ColdRelation>> {

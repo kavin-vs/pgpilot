@@ -38,6 +38,8 @@ cargo build --release # optimized binary at target/release/pgpilot
 
 Quitting the TUI (`q`) always restores your terminal, even on a crash (`ratatui::init()` installs a panic hook for this) — so it's safe to Ctrl-C out of `cargo run` too if something hangs.
 
+If you use [Claude Code](https://claude.com/claude-code), this repo ships three skills under `.claude/skills/` that encode this project's own workflows — `add-panel` (the checklist for wiring a new dashboard data source/tab), `debug-pgpilot` (known failure patterns: PG version-skew queries, terminal corruption from stray output, TLS build deps), and `release-pgpilot` (cutting a version bump). They trigger automatically on matching requests; no setup needed.
+
 ## Usage
 
 ```
@@ -102,7 +104,7 @@ pgpilot --ascii            # plain-ASCII glyphs
 | Key | Tab | What's in it |
 |---|---|---|
 | `1` | Overview | Stat cards for transactions/s and estimated p95 latency (both with sparklines) and a compact connections meter, the slowest statements, and a wait-event breakdown; below that, buffer cache hit ratio + sparkline, per-database cache hit, coldest relations (lowest cache hit), checkpoints & buffers, and replication stats. A tab-bar badge shows whether anything needs attention; `g` opens a full "diagnosis" popup ranking the top suspects behind current db load plus suggested fixes |
-| `2` | Queries | `pg_stat_statements`-backed table (total/mean/stddev time, calls, cache hit), sortable, with a detail pane for the selected statement. Shows a clear "extension not loaded" notice instead of erroring if `pg_stat_statements` isn't installed — everything else in pgpilot works without it |
+| `2` | Queries | `pg_stat_statements`-backed table (total/mean/stddev time, calls, disk I/O bytes, disk time, cache hit), sortable — including by disk I/O, which finds the query hammering storage even when its wall-clock time looks unremarkable — with a detail pane breaking out shared reads/writes, temp-file spill, and disk time for the selected statement. Disk time needs `track_io_timing = on` (off by default); the byte columns work regardless. Shows a clear "extension not loaded" notice instead of erroring if `pg_stat_statements` isn't installed — everything else in pgpilot works without it |
 | `3` | Activity | Connection-state summary cards, the full `pg_stat_activity` list (selectable), a blocking tree, and a lock/transaction summary |
 | `4` | Tables & Indexes | Schema size totals, a table list (dead-tuple %, xid age, seq-scans/hour, last autovacuum), unused/invalid indexes (with reclaimable size), and missing-index candidates (unindexed foreign keys, high seq-scan-ratio tables) |
 | `5` | Triggers | Every user-defined trigger (`pg_trigger`, excluding internal foreign-key-backing ones) — schema, table, function, enabled/disabled state; `enter` on a selected row opens a full-screen popup with that trigger's function source (`pg_get_functiondef`) |
@@ -113,7 +115,7 @@ pgpilot --ascii            # plain-ASCII glyphs
 |---|---|
 | `1`–`5` | Switch tab |
 | `↑`/`↓` or `j`/`k` | Scroll/select rows on the current tab (Queries, Activity, Tables & Indexes, Triggers) |
-| `s` | Cycle sort (Queries: total time → mean time → calls; Tables & Indexes: size/name, press again to reverse) |
+| `s` | Cycle sort (Queries: total time → mean time → calls → disk I/O; Tables & Indexes: size/name, press again to reverse) |
 | `x` / `X` | Cancel / terminate the selected Activity row's backend (`pg_cancel_backend`/`pg_terminate_backend`) — real, immediate, no confirmation prompt, same spirit as `htop`'s kill. Requires the `pg_signal_backend` role (or superuser); otherwise the attempt fails with a status message, not a crash |
 | `space` | Pause/resume polling |
 | `-` / `+` | Slow down / speed up the fast-tier poll rate |

@@ -110,19 +110,15 @@ async fn send_labeled(tx: &mpsc::Sender<AppEvent>, label: &str, result: Result<P
 }
 
 /// Counters/activity — the only tier the `-`/`+` rate keys touch. Each of
-/// the 9 queries is sent independently: one failing (e.g. a version-specific
+/// the 8 queries is sent independently: one failing (e.g. a version-specific
 /// column missing) no longer blocks the others from updating, which used to
-/// leave the whole dashboard (or, for the 4 cache/checkpoint queries, that
+/// leave the whole dashboard (or, for the cache/checkpoint queries, that
 /// whole block-set) looking dead over one broken query. `pg17_plus` picks the right
 /// checkpointer query (see `cache_io::fetch_bgwriter`).
 async fn send_fast(client: &Client, tx: &mpsc::Sender<AppEvent>, pg17_plus: bool) -> (bool, bool) {
-    let results: [(&str, Result<PanelSnapshot>); 9] = [
+    let results: [(&str, Result<PanelSnapshot>); 8] = [
         ("connections", connections::fetch(client).await.map(PanelSnapshot::Connections)),
         ("cache overview", cache_io::fetch_overall(client).await.map(PanelSnapshot::CacheOverall)),
-        (
-            "per-database cache",
-            cache_io::fetch_per_database(client).await.map(PanelSnapshot::CachePerDatabase),
-        ),
         ("coldest relations", cache_io::fetch_coldest(client).await.map(PanelSnapshot::CacheColdest)),
         (
             "checkpoints & wal",
@@ -146,9 +142,14 @@ async fn send_fast(client: &Client, tx: &mpsc::Sender<AppEvent>, pg17_plus: bool
 
 /// `pg_stat_statements`, fixed 15s — skipped (cheaply, no query at all) when
 /// the extension isn't loaded.
-async fn send_medium(client: &Client, tx: &mpsc::Sender<AppEvent>, has_pg_stat_statements: bool) -> bool {
+async fn send_medium(
+    client: &Client,
+    tx: &mpsc::Sender<AppEvent>,
+    has_pg_stat_statements: bool,
+    pg17_plus: bool,
+) -> bool {
     let data = if has_pg_stat_statements {
-        statements::fetch(client).await.map(StatementsData::Available)
+        statements::fetch(client, pg17_plus).await.map(StatementsData::Available)
     } else {
         Ok(StatementsData::NotAvailable)
     };
@@ -284,7 +285,7 @@ pub async fn poll_task(
             }
             _ = medium_ticker.tick() => {
                 if paused { continue; }
-                if !send_medium(&client, &tx, has_pg_stat_statements).await {
+                if !send_medium(&client, &tx, has_pg_stat_statements, pg17_plus).await {
                     return;
                 }
             }
@@ -331,7 +332,7 @@ pub async fn poll_task(
                                     // left of the *previous* db's 15s/5min
                                     // ticker window happens to elapse, which
                                     // reads as a stuck "loading" state.
-                                    if !send_medium(&client, &tx, has_pg_stat_statements).await {
+                                    if !send_medium(&client, &tx, has_pg_stat_statements, pg17_plus).await {
                                         return;
                                     }
                                     if !send_slow(&client, &tx).await {

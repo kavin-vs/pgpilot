@@ -10,12 +10,16 @@
 //! haystack, not a precise cost model — a known ceiling.
 
 use crate::db::activity::ActivityData;
-use crate::db::cache_io::CacheOverall;
+use crate::db::cache_io::{BgWriterStats, CacheOverall, ReplicationRow};
+use crate::db::connections::ConnectionsData;
 use crate::db::indexes::{IndexRow, UnindexedForeignKey};
 use crate::db::statements::StatementsData;
 use crate::db::tables::TablesData;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `Ord` (Warn < Bad by declaration order) lets `alerts()` sort worst-first
+/// before truncating, so a real high-severity alert can't get silently
+/// starved behind lower-priority ones appended earlier in the function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Warn,
     Bad,
@@ -51,12 +55,49 @@ pub struct DiagnosisInputs<'a> {
     pub activity: Option<&'a ActivityData>,
     pub statements: Option<&'a StatementsData>,
     pub cache: Option<&'a CacheOverall>,
+    pub connections: Option<&'a ConnectionsData>,
+    pub cache_checkpoints: Option<&'a BgWriterStats>,
+    pub replication: Option<&'a [ReplicationRow]>,
+    /// Poll-to-poll delta of `pg_stat_database.temp_bytes`, computed by
+    /// `App::record_cache_overall` — not part of `CacheOverall` itself since
+    /// that struct is a pure fetch with no derived state (same reason
+    /// `App::rollback_pct` lives outside it too). A *rate*, not the raw
+    /// cumulative-since-stats-reset total: a database that's been running
+    /// for weeks can show terabytes of lifetime temp-file usage while
+    /// currently spilling nothing at all, so thresholding the raw total
+    /// (the original v6 approach) flagged old, unrelated activity as an
+    /// ongoing problem.
+    pub temp_bytes_per_sec: Option<f64>,
 }
 
 const IDLE_IN_TXN_THRESHOLD_SECS: f64 = 60.0;
 const DEAD_TUPLE_PCT_THRESHOLD: f64 = 10.0;
 const SEQ_SCAN_HEAVY_THRESHOLD: i64 = 100;
 const IDX_USE_LOW_PCT: f64 = 50.0;
+
+// See docs/postgres-incident-research.md for the real-incident evidence
+// behind each threshold below.
+/// Netdata's wraparound guide: >500M = autovacuum falling behind the freeze
+/// pace, >1B = urgent — well ahead of the ~2^31 hard refusal point.
+const XID_WRAPAROUND_WARN_AGE: i32 = 500_000_000;
+const XID_WRAPAROUND_BAD_AGE: i32 = 1_000_000_000;
+const CONN_PRESSURE_WARN_PCT: f64 = 80.0;
+const CONN_PRESSURE_BAD_PCT: f64 = 90.0;
+/// Sustained spill rate, not a lifetime total — see `DiagnosisInputs::temp_bytes_per_sec`.
+/// A single fast-tier poll interval (default 2s) is a noisy window for a
+/// rate, same tradeoff `record_cache_overall`'s existing tps computation
+/// already accepts; not smoothed further.
+const TEMP_SPILL_WARN_BYTES_PER_SEC: f64 = 1_048_576.0; // 1 MiB/s
+const TEMP_SPILL_BAD_BYTES_PER_SEC: f64 = 10_485_760.0; // 10 MiB/s
+const REPLICATION_LAG_WARN_SECS: f64 = 30.0;
+const REPLICATION_LAG_BAD_SECS: f64 = 300.0;
+/// One level deep, same ceiling as the Activity tab's own blocking tree.
+const LOCK_WAIT_SECS: f64 = 10.0;
+/// N+1 signature: many calls, near-1 row each, individually fast — a real
+/// slow query never fits this shape. Heuristic, not a certain diagnosis.
+const N1_CALLS_MIN: i64 = 500;
+const N1_ROWS_PER_CALL_MAX: f64 = 1.5;
+const N1_MEAN_MS_MAX: f64 = 5.0;
 
 struct Candidate {
     score: f64,
@@ -156,6 +197,122 @@ pub fn diagnose(inputs: &DiagnosisInputs) -> Diagnosis {
         });
     }
 
+    if let Some(tables) = inputs.tables
+        && let Some(worst) = tables.tables.iter().max_by_key(|t| t.xid_age)
+        && worst.xid_age >= XID_WRAPAROUND_WARN_AGE
+    {
+        candidates.push(Candidate {
+            score: worst.xid_age as f64 / 1_000_000.0,
+            suspect: Suspect {
+                rank: 0,
+                kind: "xid wraparound risk".to_string(),
+                text: format!("{}.{} — xid age {} (of ~2.1B hard limit)", worst.schema_name, worst.table_name, worst.xid_age),
+                evidence: "age(relfrozenxid)".to_string(),
+                severity: if worst.xid_age >= XID_WRAPAROUND_BAD_AGE { Severity::Bad } else { Severity::Warn },
+            },
+        });
+    }
+
+    if let Some(conn) = inputs.connections
+        && conn.max_connections > 0
+    {
+        let pct = conn.used as f64 / conn.max_connections as f64 * 100.0;
+        if pct >= CONN_PRESSURE_WARN_PCT {
+            candidates.push(Candidate {
+                score: pct,
+                suspect: Suspect {
+                    rank: 0,
+                    kind: "connection pressure".to_string(),
+                    text: format!("{}/{} connections in use ({:.0}%)", conn.used, conn.max_connections, pct),
+                    evidence: "pg_stat_activity".to_string(),
+                    severity: if pct >= CONN_PRESSURE_BAD_PCT { Severity::Bad } else { Severity::Warn },
+                },
+            });
+        }
+    }
+
+    if let Some(cp) = inputs.cache_checkpoints {
+        let forced = cp.checkpoints_req > cp.checkpoints_timed;
+        let backend_picking_up_slack = cp.maxwritten_clean > 0;
+        if forced || backend_picking_up_slack {
+            candidates.push(Candidate {
+                score: if forced { 60.0 } else { 25.0 },
+                suspect: Suspect {
+                    rank: 0,
+                    kind: "checkpoint storm".to_string(),
+                    text: if forced {
+                        format!("{} requested vs {} timed checkpoints — max_wal_size likely too small", cp.checkpoints_req, cp.checkpoints_timed)
+                    } else {
+                        format!("bgwriter falling behind — backends wrote {} time(s)", cp.maxwritten_clean)
+                    },
+                    evidence: "pg_stat_bgwriter / pg_stat_checkpointer".to_string(),
+                    severity: if forced { Severity::Bad } else { Severity::Warn },
+                },
+            });
+        }
+    }
+
+    if let Some(rate) = inputs.temp_bytes_per_sec
+        && rate >= TEMP_SPILL_WARN_BYTES_PER_SEC
+    {
+        candidates.push(Candidate {
+            score: rate / 1_048_576.0,
+            suspect: Suspect {
+                rank: 0,
+                kind: "disk spill (work_mem)".to_string(),
+                text: format!("spilling {}/s to temp files, sustained", crate::format::human_bytes(rate as i64)),
+                evidence: "pg_stat_database (rate since last poll)".to_string(),
+                severity: if rate >= TEMP_SPILL_BAD_BYTES_PER_SEC { Severity::Bad } else { Severity::Warn },
+            },
+        });
+    }
+
+    if let Some(replication) = inputs.replication
+        && let Some(worst) = replication
+            .iter()
+            .filter(|r| r.replay_lag_secs.unwrap_or(0.0) >= REPLICATION_LAG_WARN_SECS)
+            .max_by(|a, b| a.replay_lag_secs.unwrap_or(0.0).total_cmp(&b.replay_lag_secs.unwrap_or(0.0)))
+    {
+        let secs = worst.replay_lag_secs.unwrap_or(0.0);
+        candidates.push(Candidate {
+            score: secs,
+            suspect: Suspect {
+                rank: 0,
+                kind: "replication lag".to_string(),
+                text: format!("{} is {} behind", worst.application_name, crate::format::human_duration(secs)),
+                evidence: "pg_stat_replication".to_string(),
+                severity: if secs >= REPLICATION_LAG_BAD_SECS { Severity::Bad } else { Severity::Warn },
+            },
+        });
+    }
+
+    if let Some(activity) = inputs.activity
+        && let Some(worst) = activity
+            .rows
+            .iter()
+            .filter(|r| !r.blocked_by.is_empty() && r.duration_secs.unwrap_or(0.0) >= LOCK_WAIT_SECS)
+            .max_by(|a, b| a.duration_secs.unwrap_or(0.0).total_cmp(&b.duration_secs.unwrap_or(0.0)))
+    {
+        let dur = worst.duration_secs.unwrap_or(0.0);
+        let blocked_count = activity.rows.iter().filter(|r| !r.blocked_by.is_empty()).count();
+        candidates.push(Candidate {
+            score: dur,
+            suspect: Suspect {
+                rank: 0,
+                kind: "lock wait chain".to_string(),
+                text: format!(
+                    "pid {} waiting {} on {:?} — {} backend(s) blocked",
+                    worst.pid,
+                    crate::format::human_duration(dur),
+                    worst.blocked_by,
+                    blocked_count
+                ),
+                evidence: "pg_blocking_pids()".to_string(),
+                severity: Severity::Bad,
+            },
+        });
+    }
+
     candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
     let suspects: Vec<Suspect> = candidates
         .into_iter()
@@ -241,7 +398,99 @@ pub fn alerts(inputs: &DiagnosisInputs) -> Vec<Alert> {
         });
     }
 
-    alerts.truncate(5);
+    if let Some(tables) = inputs.tables
+        && let Some(worst) = tables.tables.iter().max_by_key(|t| t.xid_age)
+        && worst.xid_age >= XID_WRAPAROUND_WARN_AGE
+    {
+        alerts.push(Alert {
+            severity: if worst.xid_age >= XID_WRAPAROUND_BAD_AGE { Severity::Bad } else { Severity::Warn },
+            text: format!("{}.{}: xid age {}", worst.schema_name, worst.table_name, worst.xid_age),
+            hint: "run VACUUM (FREEZE) before hitting the ~2.1B wraparound limit and forced read-only mode".to_string(),
+        });
+    }
+
+    if let Some(conn) = inputs.connections
+        && conn.max_connections > 0
+    {
+        let pct = conn.used as f64 / conn.max_connections as f64 * 100.0;
+        if pct >= CONN_PRESSURE_WARN_PCT {
+            alerts.push(Alert {
+                severity: if pct >= CONN_PRESSURE_BAD_PCT { Severity::Bad } else { Severity::Warn },
+                text: format!("{:.0}% of max_connections in use ({}/{})", pct, conn.used, conn.max_connections),
+                hint: "add pooling (e.g. PgBouncer) or raise max_connections before hitting 'too many clients already'".to_string(),
+            });
+        }
+    }
+
+    if let Some(cp) = inputs.cache_checkpoints {
+        if cp.checkpoints_req > cp.checkpoints_timed {
+            alerts.push(Alert {
+                severity: Severity::Bad,
+                text: format!("{} requested vs {} timed checkpoints", cp.checkpoints_req, cp.checkpoints_timed),
+                hint: "raise max_wal_size so checkpoints hit their timeout instead of being forced".to_string(),
+            });
+        }
+        if cp.maxwritten_clean > 0 {
+            alerts.push(Alert {
+                severity: Severity::Warn,
+                text: format!("bgwriter fell behind {} time(s), backends picked up the writes", cp.maxwritten_clean),
+                hint: "raise bgwriter_lru_maxpages".to_string(),
+            });
+        }
+    }
+
+    if let Some(rate) = inputs.temp_bytes_per_sec
+        && rate >= TEMP_SPILL_WARN_BYTES_PER_SEC
+    {
+        alerts.push(Alert {
+            severity: if rate >= TEMP_SPILL_BAD_BYTES_PER_SEC { Severity::Bad } else { Severity::Warn },
+            text: format!("spilling {}/s to temp files right now", crate::format::human_bytes(rate as i64)),
+            hint: "raise work_mem, or fix the sort/hash driving it — see Queries tab".to_string(),
+        });
+    }
+
+    if let Some(replication) = inputs.replication {
+        for r in replication.iter().filter(|r| r.replay_lag_secs.unwrap_or(0.0) >= REPLICATION_LAG_WARN_SECS) {
+            let secs = r.replay_lag_secs.unwrap_or(0.0);
+            alerts.push(Alert {
+                severity: if secs >= REPLICATION_LAG_BAD_SECS { Severity::Bad } else { Severity::Warn },
+                text: format!("{}: replaying {} behind", r.application_name, crate::format::human_duration(secs)),
+                hint: "reads from this replica are stale by that much".to_string(),
+            });
+        }
+    }
+
+    if let Some(activity) = inputs.activity {
+        for row in activity.rows.iter().filter(|r| !r.blocked_by.is_empty() && r.duration_secs.unwrap_or(0.0) >= LOCK_WAIT_SECS) {
+            alerts.push(Alert {
+                severity: Severity::Bad,
+                text: format!(
+                    "pid {} blocked {} on {:?}",
+                    row.pid,
+                    crate::format::human_duration(row.duration_secs.unwrap_or(0.0)),
+                    row.blocked_by
+                ),
+                hint: "see Activity tab's blocking tree".to_string(),
+            });
+        }
+    }
+
+    if let Some(StatementsData::Available(rows)) = inputs.statements
+        && let Some(worst) = rows
+            .iter()
+            .filter(|r| r.calls >= N1_CALLS_MIN && (r.rows as f64 / r.calls as f64) <= N1_ROWS_PER_CALL_MAX && r.mean_exec_time_ms <= N1_MEAN_MS_MAX)
+            .max_by_key(|r| r.calls)
+    {
+        let rows_per_call = worst.rows as f64 / worst.calls as f64;
+        alerts.push(Alert {
+            severity: Severity::Warn,
+            text: format!("{} — {} calls, ~{:.1} rows/call", truncate(&worst.query, 60), worst.calls, rows_per_call),
+            hint: "looks like an N+1 query loop — batch into a single query or JOIN".to_string(),
+        });
+    }
+
+    alerts.sort_by_key(|a| std::cmp::Reverse(a.severity));
+    alerts.truncate(8);
     alerts
 }
 
@@ -291,5 +540,63 @@ mod tests {
         let inputs = DiagnosisInputs::default();
         let diagnosis = diagnose(&inputs);
         assert!(diagnosis.suspects.is_empty());
+    }
+
+    #[test]
+    fn xid_age_past_bad_threshold_ranks_as_bad_wraparound_suspect() {
+        let tables = TablesData {
+            tables: vec![TableRow {
+                schema_name: "public".to_string(),
+                table_name: "events".to_string(),
+                total_bytes: 1,
+                indexes_toast_bytes: 0,
+                live_tuples: 1,
+                dead_tuple_pct: Some(0.0),
+                xid_age: XID_WRAPAROUND_BAD_AGE + 1,
+                seq_scan: 0,
+                idx_use_pct: Some(100.0),
+                last_vacuum_secs_ago: Some(1.0),
+            }],
+            schema_totals: Default::default(),
+        };
+
+        let inputs = DiagnosisInputs {
+            tables: Some(&tables),
+            ..Default::default()
+        };
+
+        let diagnosis = diagnose(&inputs);
+        let wraparound = diagnosis.suspects.iter().find(|s| s.kind == "xid wraparound risk");
+        assert!(matches!(wraparound, Some(s) if s.severity == Severity::Bad));
+    }
+
+    #[test]
+    fn n_plus_one_signature_is_flagged_as_alert() {
+        use crate::db::statements::StatementRow;
+
+        let statements = StatementsData::Available(vec![StatementRow {
+            query_id: 1,
+            query: "SELECT * FROM widgets WHERE id = $1".to_string(),
+            calls: 10_000,
+            total_exec_time_ms: 5_000.0,
+            mean_exec_time_ms: 0.5,
+            stddev_exec_time_ms: 0.1,
+            rows: 10_000,
+            shared_blks_hit: 10_000,
+            shared_blks_read: 0,
+            shared_blks_written: 0,
+            temp_blks_read: 0,
+            temp_blks_written: 0,
+            io_time_ms: 0.0,
+            cache_hit_pct: Some(100.0),
+        }]);
+
+        let inputs = DiagnosisInputs {
+            statements: Some(&statements),
+            ..Default::default()
+        };
+
+        let found = alerts(&inputs).iter().any(|a| a.hint.contains("N+1"));
+        assert!(found);
     }
 }

@@ -182,12 +182,6 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         help.push_str("  x/X: cancel/terminate");
     }
     help.push_str("  r: refresh  space: pause  g: diagnose");
-    if app.active == PanelKind::Triggers {
-        help.push_str("  enter: view function");
-    }
-    if app.active == PanelKind::Activity {
-        help.push_str("  enter: view query");
-    }
     if app.can_switch_db {
         help.push_str("  d: database");
     }

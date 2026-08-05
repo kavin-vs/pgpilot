@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::{Constraint, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::Style,
     text::Line,
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Cell, Paragraph, Row, Table},
     Frame,
 };
 
@@ -14,14 +14,25 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         widgets::loading_or_error(frame, area, app, "triggers", "Triggers");
         return;
     }
-    let rows = app.triggers.as_ref().unwrap();
-    if rows.is_empty() {
+    if app.triggers.as_ref().unwrap().is_empty() {
         let widget = Paragraph::new("no user-defined triggers in this database")
             .style(Style::default().fg(theme::TEXT_DIM))
             .block(theme::block("Triggers"));
         frame.render_widget(widget, area);
         return;
     }
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(8), Constraint::Percentage(35)])
+        .split(area);
+
+    draw_table(frame, rows[0], app);
+    draw_detail(frame, rows[1], app);
+}
+
+fn draw_table(frame: &mut Frame, area: Rect, app: &mut App) {
+    let rows = app.triggers.as_ref().unwrap();
 
     let header = Row::new(vec!["", "schema", "table", "trigger", "function", "state"])
         .style(Style::default().fg(theme::TEXT_DIMMEST));
@@ -54,37 +65,33 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         Constraint::Percentage(12),
     ];
 
-    let table = Table::new(table_rows, widths)
-        .header(header)
-        .block(theme::block("Triggers  (enter: view function source)"));
+    let table = Table::new(table_rows, widths).header(header).block(theme::block("Triggers"));
 
     frame.render_stateful_widget(table, area, &mut app.triggers_state);
 }
 
-/// Full-screen overlay showing the selected trigger's DDL + its function's
-/// full body — same `Clear`+bordered-`Paragraph`+`Wrap` shape as
-/// `widgets::draw_error_detail`. Opened with `enter` (only reachable with a
-/// row selected, see `main.rs::handle_key`), closed with `enter`/`esc`/`q`.
-pub fn draw_detail_popup(frame: &mut Frame, app: &App) {
-    let area = frame.area();
-    frame.render_widget(ratatui::widgets::Clear, area);
-
-    let Some(row) = app.selected_trigger() else {
+/// Mirrors `queries.rs`'s `draw_detail` — an always-visible pane for
+/// whichever row is highlighted, not an `enter`-triggered popup. Long
+/// function bodies simply get clipped by the pane's height, same ceiling
+/// `queries.rs`'s own detail pane already has for a long query; no scrolling
+/// in either.
+fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(rows) = &app.triggers else {
+        return;
+    };
+    let selected = app.triggers_state.selected().unwrap_or(0);
+    let Some(row) = rows.get(selected) else {
         return;
     };
 
-    let mut lines: Vec<Line> = vec![Line::from(row.trigger_def.clone()), Line::from("")];
+    let mut lines: Vec<Line> = vec![
+        Line::from(format!("{}.{} on {} — function {}", row.schema_name, row.trigger_name, row.table_name, row.function_name)),
+        Line::from(""),
+        Line::from(row.trigger_def.clone()),
+        Line::from(""),
+    ];
     lines.extend(row.function_def.lines().map(|l| Line::from(l.to_string())));
 
-    let block = Block::default()
-        .title(format!(
-            "{}.{} on {} — function {}  (enter / esc / q to close)",
-            row.schema_name, row.trigger_name, row.table_name, row.function_name
-        ))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BORDER_DETAIL))
-        .style(Style::default().bg(theme::PANEL_BG));
-
-    let widget = Paragraph::new(lines).block(block).wrap(ratatui::widgets::Wrap { trim: false });
-    frame.render_widget(widget, area);
+    let block = theme::block("Selected Trigger").border_style(Style::default().fg(theme::BORDER_DETAIL));
+    frame.render_widget(Paragraph::new(lines).block(block).wrap(ratatui::widgets::Wrap { trim: false }), area);
 }

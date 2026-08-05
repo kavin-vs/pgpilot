@@ -57,14 +57,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         widgets::draw_error_detail(frame, app);
     }
 
-    if app.trigger_detail_open {
-        triggers::draw_detail_popup(frame, app);
-    }
-
-    if app.activity_detail_open {
-        activity::draw_detail_popup(frame, app);
-    }
-
     if app.diagnosis_open {
         overview::draw_diagnosis_modal(frame, &diag, &alerts);
     }

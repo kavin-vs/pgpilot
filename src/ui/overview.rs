@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -73,6 +73,10 @@ pub(crate) fn build_inputs(app: &App) -> DiagnosisInputs<'_> {
         activity: app.activity.as_ref(),
         statements: app.statements.as_ref().map(|(d, _)| d),
         cache: app.cache_overall.as_ref().map(|(d, _)| d),
+        connections: app.connections.as_ref(),
+        cache_checkpoints: app.cache_checkpoints.as_ref(),
+        replication: app.cache_replication.as_deref(),
+        temp_bytes_per_sec: app.temp_bytes_per_sec,
     }
 }
 
@@ -159,30 +163,61 @@ fn render_card(
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+const IDLE_WAIT_KEY: &str = "idle (no active query)";
+
+// Percent of *every* poll in the window, not just the ones that caught
+// something active — dividing by active-only samples is what previously
+// made "CPU / running" read as ~100% even when RDS reported the database
+// as nearly idle. A poll that caught zero active backends contributes an
+// empty sample (see `App::wait_event_samples`), which becomes an explicit
+// `IDLE_WAIT_KEY` bucket here so that denominator is visible, not implicit.
+// Percentages across buckets can sum past 100% when multiple backends were
+// concurrently active in the same poll — that's an "average concurrent
+// sessions" style number (same idea as RDS Performance Insights' DB Load),
+// not a bug.
 fn draw_wait_events(frame: &mut Frame, area: Rect, app: &App) {
-    let total: u64 = app.wait_event_counts.values().sum();
-    let mut entries: Vec<(&String, &u64)> = app.wait_event_counts.iter().collect();
-    entries.sort_by(|a, b| b.1.cmp(a.1));
+    let total_polls = app.wait_event_samples.len();
+
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for sample in &app.wait_event_samples {
+        if sample.is_empty() {
+            *counts.entry(IDLE_WAIT_KEY).or_insert(0) += 1;
+        } else {
+            for key in sample {
+                *counts.entry(key.as_str()).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut entries: Vec<(&str, usize)> = counts.into_iter().collect();
+    entries.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     entries.truncate(6);
 
-    let lines: Vec<Line> = if total == 0 {
+    let lines: Vec<Line> = if total_polls == 0 {
         vec![Line::from("no samples yet")]
     } else {
         entries
             .iter()
             .map(|(name, count)| {
-                let pct = **count as f64 / total as f64 * 100.0;
-                let color = if pct > 25.0 { theme::BAD } else if pct > 10.0 { theme::WARN } else { theme::TEXT_DIM };
+                let pct = *count as f64 / total_polls as f64 * 100.0;
+                let color = if *name == IDLE_WAIT_KEY {
+                    theme::TEXT_DIM
+                } else if pct > 25.0 {
+                    theme::BAD
+                } else if pct > 10.0 {
+                    theme::WARN
+                } else {
+                    theme::TEXT_DIM
+                };
                 Line::from(vec![
                     Span::styled(format!("{name:<22}"), Style::default().fg(theme::TEXT_DIM)),
-                    Span::styled(charts::bar(pct, 20, app.ascii), Style::default().fg(color)),
+                    Span::styled(charts::bar(pct.min(100.0), 20, app.ascii), Style::default().fg(color)),
                     Span::raw(format!(" {pct:.0}%")),
                 ])
             })
             .collect()
     };
 
-    let block = theme::block("Where Time Goes · wait events (sampled)");
+    let block = theme::block(format!("Where Time Goes · avg active by wait type (last {total_polls} polls)"));
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -234,10 +269,15 @@ fn draw_cache_detail(frame: &mut Frame, area: Rect, app: &App) {
         ]),
         Line::from(Span::styled(spark, Style::default().fg(color))),
         Line::from(""),
+        Line::styled("cumulative since last stats reset:", Style::default().fg(theme::TEXT_DIMMEST)),
         Line::from(format!("blocks hit:  {}", cache.blks_hit)),
         Line::from(format!("blocks read: {}", cache.blks_read)),
-        Line::from(format!("temp files:  {} ({})", cache.temp_files, human_bytes(cache.temp_bytes))),
+        Line::from(format!("temp files:  {} ({} total)", cache.temp_files, human_bytes(cache.temp_bytes))),
     ];
+    if let Some(rate) = app.temp_bytes_per_sec {
+        let label = if rate > 0.0 { format!("temp spill rate: {}/s", human_bytes(rate as i64)) } else { "temp spill rate: 0 B/s".to_string() };
+        lines.push(Line::styled(label, Style::default().fg(theme::TEXT_DIM)));
+    }
     if let Some(pct) = app.rollback_pct {
         lines.push(Line::from(format!("rollback share of throughput: {pct:.1}%")));
     }
@@ -321,7 +361,13 @@ fn draw_replication(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         replication
             .iter()
-            .map(|r| format!("{}: {}", r.application_name, r.lag_bytes.map(human_bytes).unwrap_or_else(|| "?".to_string())))
+            .map(|r| {
+                let bytes = r.lag_bytes.map(human_bytes).unwrap_or_else(|| "?".to_string());
+                match r.replay_lag_secs {
+                    Some(secs) => format!("{}: {} ({} behind)", r.application_name, bytes, crate::format::human_duration(secs)),
+                    None => format!("{}: {}", r.application_name, bytes),
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -357,7 +403,7 @@ pub fn draw_diagnosis_modal(frame: &mut Frame, diag: &diagnosis::Diagnosis, aler
     if !alerts.is_empty() {
         lines.push(Line::raw(""));
         lines.push(Line::styled("Fixes", Style::default().fg(theme::TEXT_DIM)));
-        for a in alerts.iter().take(5) {
+        for a in alerts.iter().take(8) {
             let color = severity_color(a.severity);
             lines.push(Line::from(vec![
                 Span::styled("  · ", Style::default().fg(color)),

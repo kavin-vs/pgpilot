@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::widgets::TableState;
 
-use crate::db::activity::{ActivityData, ActivityRow};
+use crate::db::activity::ActivityData;
 use crate::db::cache_io::{BgWriterStats, CacheOverall, ColdRelation, ReplicationRow};
 use crate::db::connections::ConnectionsData;
 use crate::db::databases::DatabaseRow;
@@ -164,13 +164,33 @@ pub struct App {
     pub server_info: Option<ServerInfo>,
 
     pub history: History,
-    /// Point-sampled `wait_event` distribution across active backends,
-    /// accumulated since startup/db-switch (no time-windowing — a known
-    /// ceiling, see CLAUDE.md/plan notes on `pg_wait_sampling`).
-    pub wait_event_counts: HashMap<String, u64>,
+    /// One entry per fast-tier poll, holding the wait-event key (`"CPU /
+    /// running"` when a backend is active but not blocked on anything
+    /// tracked, else `"{wait_event_type}:{wait_event}"`) of every
+    /// concurrently-active backend caught that poll — usually 0 or 1
+    /// entries, occasionally more under real concurrency. Bounded to
+    /// `History::CAPACITY` (a recent window, not cumulative-since-session,
+    /// so old activity ages out) and — critically — a poll that caught
+    /// *nothing* active still pushes an empty `Vec`, so the Overview chart
+    /// can normalize percentages over every poll rather than only the
+    /// active ones. That normalization is load-bearing: dividing by
+    /// active-only samples made "CPU / running" read as ~100% on a database
+    /// that was in fact idle nearly all the time (RDS's own CPU% agreed),
+    /// since almost every poll that *did* catch something active caught a
+    /// fast, cache-hot query with no wait event — a real production report.
+    /// Point sampling still can't catch sub-poll-interval waits (a known
+    /// ceiling shared with any `pg_stat_activity`-based approach short of
+    /// `pg_wait_sampling`), but no longer overstates *how often* the
+    /// database is doing anything at all.
+    pub wait_event_samples: VecDeque<Vec<String>>,
     /// Most recent rollback share of the throughput chart's commit+rollback
     /// delta; not historized, just the latest value.
     pub rollback_pct: Option<f64>,
+    /// Poll-to-poll delta of `pg_stat_database.temp_bytes` / dt — a rate,
+    /// not the raw cumulative total (which only grows and can't tell you
+    /// whether spilling is happening *now* vs. happened once weeks ago).
+    /// `None` until the second poll, same as `rollback_pct`.
+    pub temp_bytes_per_sec: Option<f64>,
 
     /// Sticky per-source errors (source label -> message) — a source's entry
     /// is cleared only when *that same source* succeeds again, not by any
@@ -181,22 +201,9 @@ pub struct App {
     /// unwrapped text of every current error — the footer's single line
     /// truncates long Postgres error messages (DETAIL/HINT, etc.).
     pub error_detail_open: bool,
-    /// Toggled by `enter` while a Triggers row is selected, to show that
-    /// trigger's function source full-screen — same shape as
-    /// `error_detail_open`, just keyed off the selected row instead of
-    /// `errors`.
-    pub trigger_detail_open: bool,
-    /// Toggled by `enter` while an Activity row is selected, to show that
-    /// backend's full, untruncated query text — same shape as
-    /// `trigger_detail_open`, just keyed off the Activity selection instead
-    /// of the Triggers one. The underlying text is still capped at 220 chars
-    /// server-side (see `db::activity`), but the table's own query column is
-    /// usually far narrower than that on a typical terminal width, so this
-    /// still recovers text the table itself can't show.
-    pub activity_detail_open: bool,
     /// Toggled by `g` to show the diagnosis modal (headline + ranked
-    /// suspects + fix hints) — always openable, unlike the other two
-    /// overlays, since the heuristic runs even with an empty result.
+    /// suspects + fix hints) — always openable, unlike `error_detail_open`,
+    /// since the heuristic runs even with an empty result.
     pub diagnosis_open: bool,
     /// Transient status-line feedback (sort changed, refreshed, cancel/
     /// terminate result) — distinct from the sticky `errors` banner. The
@@ -265,12 +272,11 @@ impl App {
             triggers: None,
             server_info: None,
             history: History::default(),
-            wait_event_counts: HashMap::new(),
+            wait_event_samples: VecDeque::new(),
             rollback_pct: None,
+            temp_bytes_per_sec: None,
             errors: BTreeMap::new(),
             error_detail_open: false,
-            trigger_detail_open: false,
-            activity_detail_open: false,
             diagnosis_open: false,
             status: None,
             last_refresh: None,
@@ -440,14 +446,6 @@ impl App {
         self.activity.as_ref()?.rows.get(idx).map(|r| r.pid)
     }
 
-    pub fn selected_activity_row(&self) -> Option<&ActivityRow> {
-        self.activity.as_ref()?.rows.get(self.activity_state.selected()?)
-    }
-
-    pub fn selected_trigger(&self) -> Option<&TriggerRow> {
-        self.triggers.as_ref()?.get(self.triggers_state.selected()?)
-    }
-
     pub fn record_connections(&mut self, data: ConnectionsData) {
         History::push(&mut self.history.conn, data.used as f64);
         self.connections = Some(data);
@@ -468,6 +466,9 @@ impl App {
                 } else {
                     None
                 };
+
+                let temp_bytes_delta = (data.temp_bytes - old.temp_bytes).max(0) as f64;
+                self.temp_bytes_per_sec = Some(temp_bytes_delta / dt);
             }
         }
         History::push(&mut self.history.cache_pct, data.hit_ratio_pct.unwrap_or(0.0));
@@ -536,15 +537,18 @@ impl App {
     }
 
     pub fn record_activity(&mut self, data: ActivityData) {
-        for row in &data.rows {
-            if row.state.as_deref() != Some("active") {
-                continue;
-            }
-            let key = match (&row.wait_event_type, &row.wait_event) {
+        let sample: Vec<String> = data
+            .rows
+            .iter()
+            .filter(|row| row.state.as_deref() == Some("active"))
+            .map(|row| match (&row.wait_event_type, &row.wait_event) {
                 (Some(t), Some(e)) => format!("{t}:{e}"),
                 _ => "CPU / running".to_string(),
-            };
-            *self.wait_event_counts.entry(key).or_insert(0) += 1;
+            })
+            .collect();
+        self.wait_event_samples.push_back(sample);
+        if self.wait_event_samples.len() > History::CAPACITY {
+            self.wait_event_samples.pop_front();
         }
         self.activity = Some(data);
     }
@@ -568,12 +572,11 @@ impl App {
         self.triggers = None;
         self.server_info = None;
         self.history = History::default();
-        self.wait_event_counts.clear();
+        self.wait_event_samples.clear();
         self.rollback_pct = None;
+        self.temp_bytes_per_sec = None;
         self.errors.clear();
         self.error_detail_open = false;
-        self.trigger_detail_open = false;
-        self.activity_detail_open = false;
         self.diagnosis_open = false;
         self.tables_state = TableState::default();
         self.queries_state = TableState::default();

@@ -53,6 +53,10 @@ pub struct ReplicationRow {
     /// downstream replicas of its own (the common case) returns 0 rows and
     /// never hits that error.
     pub lag_bytes: Option<i64>,
+    /// Seconds since the standby replayed the primary's most recent WAL —
+    /// the more actionable "how stale are reads" figure vs. `lag_bytes`.
+    /// `None` until the standby has replayed anything.
+    pub replay_lag_secs: Option<f64>,
 }
 
 // Percentages computed as float8 (not NUMERIC) so they map directly to f64
@@ -114,7 +118,9 @@ const BGWRITER_QUERY_PG17_PLUS: &str = "
 ";
 
 const REPLICATION_QUERY: &str = "
-    SELECT application_name, pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::bigint AS lag_bytes
+    SELECT application_name,
+           pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::bigint AS lag_bytes,
+           EXTRACT(EPOCH FROM replay_lag)::float8 AS replay_lag_secs
     FROM pg_stat_replication
 ";
 
@@ -182,6 +188,7 @@ pub async fn fetch_replication(client: &Client) -> Result<Vec<ReplicationRow>> {
         .map(|row| ReplicationRow {
             application_name: row.get("application_name"),
             lag_bytes: row.get("lag_bytes"),
+            replay_lag_secs: row.get("replay_lag_secs"),
         })
         .collect())
 }

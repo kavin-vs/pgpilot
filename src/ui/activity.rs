@@ -18,13 +18,20 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(8), Constraint::Percentage(30), Constraint::Length(3)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(6),
+            Constraint::Length(6),
+            Constraint::Min(5),
+            Constraint::Length(3),
+        ])
         .split(area);
 
     draw_summary_cards(frame, rows[0], app);
     draw_activity_table(frame, rows[1], app);
-    draw_blocking_tree(frame, rows[2], app);
-    draw_lock_strip(frame, rows[3], app);
+    draw_detail(frame, rows[2], app);
+    draw_blocking_tree(frame, rows[3], app);
+    draw_lock_strip(frame, rows[4], app);
 }
 
 fn draw_summary_cards(frame: &mut Frame, area: Rect, app: &App) {
@@ -108,46 +115,45 @@ fn draw_activity_table(frame: &mut Frame, area: Rect, app: &mut App) {
         Constraint::Percentage(30),
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(theme::block("pg_stat_activity  (enter: view full query · x: cancel · X: terminate backend)"));
+    let table = Table::new(rows, widths).header(header).block(theme::block("pg_stat_activity  (x: cancel · X: terminate backend)"));
     frame.render_stateful_widget(table, area, &mut app.activity_state);
 }
 
-/// Full-screen overlay showing the selected backend's full query text —
-/// same `Clear`+bordered-`Paragraph`+`Wrap` shape as
-/// `triggers::draw_detail_popup`. Opened with `enter` (only reachable with a
-/// row selected, see `main.rs::handle_key`), closed with `enter`/`esc`/`q`.
-pub fn draw_detail_popup(frame: &mut Frame, app: &App) {
-    let area = frame.area();
-    frame.render_widget(ratatui::widgets::Clear, area);
-
-    let Some(row) = app.selected_activity_row() else {
+/// Always-visible pane for whichever row is highlighted, matching
+/// `queries.rs`'s `draw_detail` shape — not an `enter`-triggered popup. The
+/// table's own query column is usually narrower than the 220-char
+/// server-side cap (see `db::activity`), so this is where the full text
+/// actually becomes readable; long text just gets clipped by the pane's
+/// height, same no-scroll ceiling `queries.rs`'s detail pane already has.
+fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(activity) = &app.activity else {
         return;
     };
-
-    let text = row.query.clone().unwrap_or_else(|| "(no query text)".to_string());
-    let lines: Vec<Line> = text.lines().map(|l| Line::from(l.to_string())).collect();
+    let selected = app.activity_state.selected().unwrap_or(0);
+    let Some(row) = activity.rows.get(selected) else {
+        return;
+    };
 
     let wait = match (&row.wait_event_type, &row.wait_event) {
         (Some(t), Some(e)) => format!("{t}:{e}"),
         _ => "—".to_string(),
     };
     let dur = row.duration_secs.map(human_duration).unwrap_or_default();
+    let text = row.query.clone().unwrap_or_else(|| "(no query text)".to_string());
 
-    let block = Block::default()
-        .title(format!(
-            "pid {}  user {}  state {}  duration {dur}  wait {wait}  (enter / esc / q to close)",
+    let mut lines = vec![
+        Line::from(format!(
+            "pid {}  user {}  state {}  duration {dur}  wait {wait}",
             row.pid,
             row.username.as_deref().unwrap_or("—"),
             row.state.as_deref().unwrap_or("—"),
-        ))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BORDER_DETAIL))
-        .style(Style::default().bg(theme::PANEL_BG));
+        )),
+        Line::from(""),
+    ];
+    lines.extend(text.lines().map(|l| Line::from(l.to_string())));
 
-    let widget = Paragraph::new(lines).block(block).wrap(ratatui::widgets::Wrap { trim: false });
-    frame.render_widget(widget, area);
+    let block = theme::block("Selected Backend").border_style(Style::default().fg(theme::BORDER_DETAIL));
+    frame.render_widget(Paragraph::new(lines).block(block).wrap(ratatui::widgets::Wrap { trim: false }), area);
 }
 
 fn draw_blocking_tree(frame: &mut Frame, area: Rect, app: &App) {

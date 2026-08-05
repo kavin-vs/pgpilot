@@ -287,20 +287,6 @@ fn handle_key(app: &mut App, code: KeyCode, refresh_now: &Arc<Notify>, control_t
         return;
     }
 
-    if app.trigger_detail_open {
-        if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
-            app.trigger_detail_open = false;
-        }
-        return;
-    }
-
-    if app.activity_detail_open {
-        if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
-            app.activity_detail_open = false;
-        }
-        return;
-    }
-
     if app.diagnosis_open {
         if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('g')) {
             app.diagnosis_open = false;
@@ -338,12 +324,6 @@ fn handle_key(app: &mut App, code: KeyCode, refresh_now: &Arc<Notify>, control_t
         KeyCode::Char('d') => app.open_db_popup(),
         KeyCode::Char('e') if !app.errors.is_empty() => app.error_detail_open = true,
         KeyCode::Char('g') => app.diagnosis_open = true,
-        KeyCode::Enter if app.active == PanelKind::Triggers && app.selected_trigger().is_some() => {
-            app.trigger_detail_open = true;
-        }
-        KeyCode::Enter if app.active == PanelKind::Activity && app.selected_activity_row().is_some() => {
-            app.activity_detail_open = true;
-        }
         KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
         KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
         KeyCode::Char('s') => app.cycle_sort(),

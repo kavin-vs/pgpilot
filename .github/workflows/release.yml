@@ -49,20 +49,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Package (unix)
+      - name: Build + package (unix)
         if: matrix.archive == 'tar.gz'
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ env.BIN_NAME }}-${{ github.ref_name }}-${{ matrix.target }}.tar.gz ${{ env.BIN_NAME }}
+        run: scripts/build-target.sh ${{ matrix.target }} ${{ github.ref_name }}
+      - name: Build (windows)
+        if: matrix.archive == 'zip'
+        run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package (windows)
         if: matrix.archive == 'zip'
         shell: pwsh
-        run: Compress-Archive -Path target/${{ matrix.target }}/release/${{ env.BIN_NAME }}.exe -DestinationPath ${{ env.BIN_NAME }}-${{ github.ref_name }}-${{ matrix.target }}.zip
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path target/${{ matrix.target }}/release/${{ env.BIN_NAME }}.exe -DestinationPath dist/${{ env.BIN_NAME }}-${{ github.ref_name }}-${{ matrix.target }}.zip
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: ${{ env.BIN_NAME }}-${{ github.ref_name }}-${{ matrix.target }}.*
+          path: dist/${{ env.BIN_NAME }}-${{ github.ref_name }}-${{ matrix.target }}.*
 
   publish:
     needs: [build]

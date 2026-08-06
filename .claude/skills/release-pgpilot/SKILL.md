@@ -17,4 +17,6 @@ GitHub Release via `gh release create --generate-notes`. This checklist is what 
 5. `git tag v<version>` — **ask the user before pushing the tag**; pushing is a shared/visible action, and for this repo specifically it also triggers the release workflow (4 platform builds + a public GitHub Release), not just a local git operation.
 6. Once pushed, watch the Actions run: `check-version` → 4-target `build` → `publish`. If any leg fails, the tag already exists — fix forward with a new patch version and tag rather than force-pushing/deleting the old tag.
 
+**Manual fallback**: if CI is down or you want to publish without waiting on it, `scripts/release.sh` does the same build+publish steps locally, for whatever targets the current OS can build natively (macOS → both Apple targets; Linux → x86_64-gnu; no Windows support running it locally). It still requires the `vX.Y.Z` tag to already exist (step 5) — it won't create or push one for you, same "ask before pushing" boundary. Both it and CI call the same underlying `scripts/build-target.sh <target>` for the actual build+package step, so there's one implementation, not two that can drift.
+
 Explicitly out of scope: changelog file generation (GitHub's `--generate-notes` covers this), crates.io publishing, a Homebrew tap (would need a second public repo — not set up, see CLAUDE.md's Versioning & releases section).

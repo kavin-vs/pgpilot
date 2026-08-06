@@ -4,7 +4,19 @@ A lightweight, interactive terminal dashboard for Postgres — an overview with 
 
 ## Install / Build
 
-Requires a Rust toolchain (`cargo`).
+**macOS / Linux** — install the latest release with one command:
+
+```
+curl -fsSL https://raw.githubusercontent.com/kavin-VS/pgpilot/master/install.sh | sh
+```
+
+Installs to `~/.local/bin` (override with `PGPILOT_INSTALL_DIR`). Make sure that directory
+is on your `PATH`.
+
+**Windows** — download the `.zip` for your platform from the
+[Releases page](https://github.com/kavin-VS/pgpilot/releases).
+
+**From source** (any platform, requires a Rust toolchain):
 
 ```
 cargo build --release

@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-REPO="kavin-VS/pgpilot"
+REPO="kavin-vs/pgpilot"
 BIN_NAME="pgpilot"
 INSTALL_DIR="${PGPILOT_INSTALL_DIR:-$HOME/.local/bin}"
 

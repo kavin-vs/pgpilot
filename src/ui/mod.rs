@@ -2,6 +2,7 @@ pub mod activity;
 pub mod charts;
 pub mod overview;
 pub mod picker;
+pub mod playground;
 pub mod queries;
 pub mod tables_indexes;
 pub mod theme;
@@ -27,6 +28,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .split(frame.area());
 
+    // Written unconditionally every frame (the tab bar is always on screen,
+    // unlike per-tab table/detail Rects) so `main.rs::handle_mouse_click`
+    // can hit-test a click into a tab switch.
+    app.tab_bar_rect = Some(chunks[1]);
+
     // Computed once per frame — the owned `Diagnosis`/`Vec<Alert>` results
     // outlive the `&App` borrow `build_inputs` takes, so they don't fight the
     // `&mut App` the tab draws below need for their own stateful widgets
@@ -45,6 +51,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         PanelKind::Activity => activity::draw(frame, chunks[2], app),
         PanelKind::TablesIndexes => tables_indexes::draw(frame, chunks[2], app),
         PanelKind::Triggers => triggers::draw(frame, chunks[2], app),
+        PanelKind::Playground => playground::draw(frame, chunks[2], app),
     }
 
     widgets::draw_footer(frame, chunks[3], app);
@@ -59,5 +66,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.diagnosis_open {
         overview::draw_diagnosis_modal(frame, &diag, &alerts);
+    }
+
+    if app.detail_popup_open {
+        match app.active {
+            PanelKind::Queries => queries::draw_detail_popup(frame, app),
+            PanelKind::Activity => activity::draw_detail_popup(frame, app),
+            PanelKind::Triggers => triggers::draw_detail_popup(frame, app),
+            _ => {}
+        }
     }
 }

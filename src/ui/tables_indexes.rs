@@ -12,6 +12,7 @@ use crate::ui::{theme, widgets};
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.tables.is_none() {
+        app.table_pane_rect = None;
         widgets::loading_or_error(frame, area, app, "tables", "Tables & Indexes");
         return;
     }
@@ -21,6 +22,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         .constraints([Constraint::Length(3), Constraint::Percentage(52), Constraint::Percentage(45)])
         .split(area);
 
+    app.table_pane_rect = Some(rows[1]);
     draw_schema_totals(frame, rows[0], app);
     draw_tables(frame, rows[1], app);
 

@@ -4,7 +4,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Tabs},
+    widgets::{Block, Borders, Paragraph, Tabs, Wrap},
     Frame,
 };
 
@@ -62,6 +62,62 @@ pub fn loading_or_error(frame: &mut Frame, area: Rect, app: &App, source_label: 
         Some(message) => error_block(frame, area, title, message),
         None => loading(frame, area, title, app.spinner_frame),
     }
+}
+
+/// Approximates how many terminal rows `lines` occupies once soft-wrapped to
+/// `width` — `Paragraph`'s own `line_count()` would give an exact answer but
+/// is gated behind ratatui's `unstable-rendered-line-info` cargo feature (not
+/// worth the semver-exempt instability for a scroll-clamp estimate). Greedy
+/// width/column division slightly undercounts vs. true word-wrap on a line
+/// that breaks early at a word boundary — fine here, it only feeds a scroll
+/// clamp and a position indicator, not exact layout.
+fn wrapped_row_count(lines: &[Line], width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    lines.iter().map(|l| l.width().max(1).div_ceil(width) as u16).sum()
+}
+
+/// Pure wrap/clamp computation shared by `draw_scrollable` (which wraps the
+/// result in its own bordered+titled `Block`) and Playground's transcript
+/// (which instead renders borderless inside one outer block spanning both
+/// the transcript and the live input below it — see `ui::playground::draw`,
+/// "same like psql", a single continuous view rather than two separately
+/// bordered boxes). Returns the built (unblocked) `Paragraph`, the clamped
+/// scroll offset, the total wrapped-row count, and the max meaningful scroll
+/// offset — callers needing "is the user already at the bottom" (Playground's
+/// infinite-scroll trigger) use the latter instead of re-deriving it.
+pub(crate) fn scrollable_paragraph(lines: Vec<Line>, width: u16, height: u16, scroll: u16) -> (Paragraph, u16, u16, u16) {
+    let total = wrapped_row_count(&lines, width);
+    let max_scroll = total.saturating_sub(height);
+    let clamped = scroll.min(max_scroll);
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((clamped, 0));
+    (paragraph, clamped, total, max_scroll)
+}
+
+/// Shared "detail pane" renderer for the always-visible bottom panes on
+/// Queries/Triggers/Activity (full SQL/DDL text for the selected row) — one
+/// implementation instead of three, since all three wrap+clamp+render
+/// identically. `scroll` is the caller's `App::detail_scroll`, already
+/// resettable per-tab/per-row; this only clamps it to what the pane can
+/// actually show and appends a `[a-b/N]` position indicator to the title
+/// once content overflows, so overflow is visible rather than silently
+/// clipped.
+/// Returns the max meaningful scroll offset for the content just rendered
+/// (`total` wrapped rows minus the visible height) — callers that need to
+/// know "is the user already at the bottom" (Playground's infinite-scroll
+/// trigger, see `App::playground_max_scroll`) can stash this each frame
+/// instead of re-deriving `wrapped_row_count` themselves.
+pub fn draw_scrollable(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line>, scroll: u16) -> u16 {
+    let inner_width = area.width.saturating_sub(2);
+    let inner_height = area.height.saturating_sub(2);
+    let (paragraph, clamped, total, max_scroll) = scrollable_paragraph(lines, inner_width, inner_height, scroll);
+    let full_title = if total > inner_height {
+        format!("{title}  [{}-{}/{}]  PgUp/PgDn", clamped + 1, (clamped + inner_height).min(total), total)
+    } else {
+        title.to_string()
+    };
+    let block = theme::block(full_title).border_style(Style::default().fg(theme::BORDER_DETAIL));
+    frame.render_widget(paragraph.block(block), area);
+    max_scroll
 }
 
 /// Persistent top info bar: brand, current db, host:port, PG version, size,
@@ -163,29 +219,41 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         None => "  |  no data yet".to_string(),
     };
 
-    // Only advertise keys that actually do something on the active tab —
-    // mirrors app.rs's active_row_count/cycle_sort/cancel_or_terminate.
-    let has_rows = matches!(
-        app.active,
-        PanelKind::Queries | PanelKind::Activity | PanelKind::TablesIndexes | PanelKind::Triggers
-    );
-    let has_sort = matches!(app.active, PanelKind::Queries | PanelKind::TablesIndexes);
+    // The Playground tab captures every plain key for its editor (see
+    // `main.rs::handle_playground_key`) — none of the other tabs' shortcuts
+    // apply there, so it gets its own help string entirely.
+    let help = if app.active == PanelKind::Playground {
+        "esc: back  enter: run (when ';'-terminated)  F5/ctrl-enter: force-run  tab: complete  ctrl-c: cancel  \u{2191}/\u{2193}: history  PgUp/PgDn: scroll  ctrl-q: quit".to_string()
+    } else {
+        // Only advertise keys that actually do something on the active tab —
+        // mirrors app.rs's active_row_count/cycle_sort/cancel_or_terminate.
+        let has_rows = matches!(
+            app.active,
+            PanelKind::Queries | PanelKind::Activity | PanelKind::TablesIndexes | PanelKind::Triggers
+        );
+        let has_sort = matches!(app.active, PanelKind::Queries | PanelKind::TablesIndexes);
+        let has_detail = matches!(app.active, PanelKind::Queries | PanelKind::Activity | PanelKind::Triggers);
 
-    let mut help = "q: quit  1-5: view".to_string();
-    if has_rows {
-        help.push_str("  j/k: move");
-    }
-    if has_sort {
-        help.push_str("  s: sort");
-    }
-    if app.active == PanelKind::Activity {
-        help.push_str("  x/X: cancel/terminate");
-    }
-    help.push_str("  r: refresh  space: pause  g: diagnose");
-    if app.can_switch_db {
-        help.push_str("  d: database");
-    }
-    help.push_str(&format!("  -/+: rate {}", human_rate(app.rate)));
+        let mut help = "q: quit  1-6: view".to_string();
+        if has_rows {
+            help.push_str("  j/k: move");
+        }
+        if has_sort {
+            help.push_str("  s: sort");
+        }
+        if has_detail {
+            help.push_str("  PgUp/PgDn: scroll detail");
+        }
+        if app.active == PanelKind::Activity {
+            help.push_str("  x/X: cancel/terminate");
+        }
+        help.push_str("  r: refresh  space: pause  g: diagnose");
+        if app.can_switch_db {
+            help.push_str("  d: database");
+        }
+        help.push_str(&format!("  -/+: rate {}", human_rate(app.rate)));
+        help
+    };
 
     let status = app.status.as_ref().filter(|(_, _, at)| at.elapsed() < STATUS_TTL);
 
@@ -260,5 +328,42 @@ mod tests {
         assert_eq!(cell.symbol(), "1");
         assert_eq!(cell.bg, theme::ROW_SELECTED_BG);
         assert_eq!(cell.fg, theme::TEXT_BRIGHT);
+    }
+
+    #[test]
+    fn wrapped_row_count_divides_by_width_and_floors_empty_lines_at_one() {
+        let lines = vec![Line::from("a".repeat(10)), Line::from("short"), Line::from("")];
+        // 10 chars / width 4 -> 3 rows; "short" (5 chars) / 4 -> 2 rows; empty -> 1 row (min 1).
+        assert_eq!(wrapped_row_count(&lines, 4), 3 + 2 + 1);
+    }
+
+    /// A scroll offset far past the end of the content must clamp to the
+    /// last full screen of text (not scroll into blank space), and the
+    /// title must report that clamped position, not the raw requested one.
+    #[test]
+    fn draw_scrollable_clamps_scroll_and_reports_position_when_overflowing() {
+        let lines: Vec<Line> = (0..10).map(|i| Line::from(format!("line{i}"))).collect();
+        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        terminal.draw(|f| { draw_scrollable(f, f.area(), "Test", lines, 100); }).unwrap();
+        let buf = terminal.backend().buffer();
+
+        let title_row: String = (0..20).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        assert!(title_row.contains("[8-10/10]"), "expected clamped position in title, got: {title_row:?}");
+
+        // inner_height is 3 rows (5 - 2 border); scroll clamped to 10-3=7 means
+        // the first visible content row is "line7", not the raw-scroll-100 blank.
+        let first_content_row: String = (0..20).map(|x| buf[(x, 1)].symbol().to_string()).collect();
+        assert!(first_content_row.contains("line7"), "expected line7 first, got: {first_content_row:?}");
+    }
+
+    #[test]
+    fn draw_scrollable_omits_indicator_when_content_fits_pane() {
+        let lines = vec![Line::from("only one line")];
+        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        terminal.draw(|f| { draw_scrollable(f, f.area(), "Test", lines, 50); }).unwrap();
+        let buf = terminal.backend().buffer();
+
+        let title_row: String = (0..20).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        assert!(!title_row.contains('['), "no scroll indicator expected when content fits, got: {title_row:?}");
     }
 }

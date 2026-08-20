@@ -13,12 +13,16 @@ use crate::ui::{charts, theme, widgets};
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.statements.is_none() {
+        app.detail_pane_rect = None;
+        app.table_pane_rect = None;
         widgets::loading_or_error(frame, area, app, "pg_stat_statements", "Queries");
         return;
     }
 
     let is_not_available = matches!(&app.statements, Some((StatementsData::NotAvailable, _)));
     if is_not_available {
+        app.detail_pane_rect = None;
+        app.table_pane_rect = None;
         draw_not_available(frame, area);
         return;
     }
@@ -28,8 +32,20 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         .constraints([Constraint::Min(8), Constraint::Percentage(35)])
         .split(area);
 
+    app.detail_pane_rect = Some(rows[1]);
+    app.table_pane_rect = Some(rows[0]);
     draw_table(frame, rows[0], app);
     draw_detail(frame, rows[1], app);
+}
+
+/// Full-screen zoom of `draw_detail`, opened by clicking the inline pane
+/// (`App::detail_popup_open`) — same content and `PageUp`/`PageDown`
+/// scrolling, just more room to read a long query. `esc`/`q` closes it (see
+/// `main.rs::handle_key`).
+pub(crate) fn draw_detail_popup(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    frame.render_widget(ratatui::widgets::Clear, area);
+    draw_detail(frame, area, app);
 }
 
 fn draw_not_available(frame: &mut Frame, area: Rect) {
@@ -179,8 +195,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
-    let block = theme::block("Selected Statement").border_style(Style::default().fg(theme::BORDER_DETAIL));
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    widgets::draw_scrollable(frame, area, "Selected Statement", lines, app.detail_scroll);
 }
 
 fn advise(row: &crate::db::statements::StatementRow) -> String {

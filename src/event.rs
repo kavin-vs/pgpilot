@@ -3,6 +3,7 @@ use crate::db::cache_io::{BgWriterStats, CacheOverall, ColdRelation, Replication
 use crate::db::connections::ConnectionsData;
 use crate::db::databases::DatabaseRow;
 use crate::db::indexes::{IndexRow, UnindexedForeignKey};
+use crate::db::playground::StatementResult;
 use crate::db::serverinfo::ServerInfo;
 use crate::db::statements::StatementsData;
 use crate::db::tables::TablesData;
@@ -69,6 +70,26 @@ pub enum AppEvent {
     /// refreshed, cancel/terminate result) — distinct from the sticky
     /// `Error` banner.
     Status(String, StatusLevel),
+    /// One-shot Playground query result (or a playground-connection-level
+    /// problem, e.g. a failed db-switch reconnect) — deliberately not a
+    /// `PanelSnapshot`/sticky `App::errors` entry: a one-shot user action,
+    /// not a polled panel that can be "persistently broken." `has_more`
+    /// is only ever `true` for a single-`SELECT` result the task chose to
+    /// paginate (see `db::playground::is_single_paginatable_select`).
+    PlaygroundResult { result: Result<Vec<StatementResult>, String>, has_more: bool },
+    /// A follow-up page for a paginated Playground query, requested by
+    /// scrolling to the bottom of the output pane (see
+    /// `main.rs::handle_playground_key`'s `PageDown` arm). Always carries a
+    /// `Result` (rather than a separate error path) so the UI can
+    /// unconditionally clear `App::playground_fetching_more` from one match
+    /// arm regardless of outcome — same reasoning as `PlaygroundResult`
+    /// itself carrying a `Result`.
+    PlaygroundMore { result: Result<StatementResult, String>, has_more: bool },
+    /// The Playground connection's own backend pid (`pg_backend_pid()`),
+    /// sent once at connect and again after every successful `SwitchDb`
+    /// reconnect — lets Ctrl+C cancel a running Playground query via the
+    /// existing `PollControl::Cancel` plumbing (see `main.rs::playground_cancel`).
+    PlaygroundPid(i32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

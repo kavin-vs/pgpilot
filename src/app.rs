@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 
 use crate::db::activity::ActivityData;
@@ -8,10 +9,12 @@ use crate::db::cache_io::{BgWriterStats, CacheOverall, ColdRelation, Replication
 use crate::db::connections::ConnectionsData;
 use crate::db::databases::DatabaseRow;
 use crate::db::indexes::{IndexRow, UnindexedForeignKey};
+use crate::db::playground::StatementResult;
 use crate::db::serverinfo::ServerInfo;
 use crate::db::statements::StatementsData;
 use crate::db::tables::TablesData;
 use crate::db::triggers::TriggerRow;
+use crate::editor::SqlEditor;
 use crate::event::StatusLevel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,15 +24,17 @@ pub enum PanelKind {
     Activity,
     TablesIndexes,
     Triggers,
+    Playground,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 5] = [
+    pub const ALL: [PanelKind; 6] = [
         PanelKind::Overview,
         PanelKind::Queries,
         PanelKind::Activity,
         PanelKind::TablesIndexes,
         PanelKind::Triggers,
+        PanelKind::Playground,
     ];
 
     pub fn title(&self) -> &'static str {
@@ -39,8 +44,34 @@ impl PanelKind {
             PanelKind::Activity => "Activity",
             PanelKind::TablesIndexes => "Tables & Indexes",
             PanelKind::Triggers => "Triggers",
+            PanelKind::Playground => "Playground",
         }
     }
+}
+
+/// One submitted command in the Playground's psql-style transcript — the
+/// input text (re-rendered with prompt lines at draw time, see
+/// `ui::playground`) plus its outcome. `result: None` means it's still
+/// running; `has_more`/`fetching_more` mirror the old flat `App` fields but
+/// scoped per-entry, since pagination only ever applies to whichever entry
+/// was most recently run.
+pub struct PlaygroundEntry {
+    pub sql: String,
+    pub result: Option<Result<Vec<StatementResult>, String>>,
+    pub has_more: bool,
+    pub fetching_more: bool,
+}
+
+/// In-progress Tab-completion cycle state (see `main.rs::playground_autocomplete`)
+/// — lets a second consecutive Tab press replace the just-inserted candidate
+/// with the next one instead of recomputing from scratch. `row`/`start_col`
+/// identify the word being completed so an edit or cursor move elsewhere
+/// invalidates the cycle (checked in `main.rs::handle_playground_key`).
+pub struct PlaygroundComplete {
+    pub row: usize,
+    pub start_col: usize,
+    pub candidates: Vec<String>,
+    pub index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +268,76 @@ pub struct App {
 
     pub triggers_state: TableState,
 
+    /// Line offset for whichever tab's detail pane is currently visible
+    /// (Queries/Triggers/Activity — see `ui::widgets::draw_scrollable`). One
+    /// shared field, not per-tab, since only one detail pane renders at a
+    /// time; reset to 0 whenever its content changes (row cursor moves, tab
+    /// switches, db switches) via `set_active`/`scroll_down`/`scroll_up`/
+    /// `on_db_switched`, so a stale offset never hides newly-selected content.
+    pub detail_scroll: u16,
+    /// The detail pane's on-screen `Rect` as of the last frame, set by that
+    /// tab's own `draw()` (`None` whenever that tab has no detail pane on
+    /// screen right now — loading/empty/not-available states, or a tab
+    /// without one at all) so a click can be hit-tested against it without
+    /// re-deriving the layout in the input handler.
+    pub detail_pane_rect: Option<Rect>,
+    /// Toggled by clicking inside `detail_pane_rect` — a full-screen zoom of
+    /// the same detail content (see `ui::mod::draw`'s dispatch and each
+    /// tab's `draw_detail_popup`), closed by `esc`/`q`. `PageUp`/`PageDown`
+    /// keep working while it's open, scrolling the same `detail_scroll`.
+    pub detail_popup_open: bool,
+    /// The active tab's row table on-screen `Rect` as of the last frame —
+    /// mirrors `detail_pane_rect` exactly (`None` on early-return/no-data
+    /// states), one shared field since only one tab's table is ever visible
+    /// at a time. Lets `main.rs::handle_mouse_click` hit-test a click into a
+    /// row selection without re-deriving the layout.
+    pub table_pane_rect: Option<Rect>,
+    /// The tab bar's on-screen `Rect` as of the last frame — written
+    /// unconditionally every frame (`ui::mod::draw`'s top-level layout
+    /// computes it regardless of which tab is active), but still `Option` to
+    /// match this codebase's one existing Rect-caching convention and to
+    /// stay a safe no-op for the sliver of time before the very first frame
+    /// draws.
+    pub tab_bar_rect: Option<Rect>,
+
+    /// The Playground tab's draft SQL — the live input line(s) below the
+    /// transcript, persisting across tab switches and database switches
+    /// (only cleared by submitting it or by the user editing it themselves).
+    pub playground_editor: SqlEditor,
+    /// A psql-style scrolling transcript: one entry per submitted command,
+    /// oldest first, capped at `main.rs::PLAYGROUND_HISTORY_CAP` (in-memory/
+    /// session-scoped only, no disk persistence). The last entry is the only
+    /// one that can be `result: None` (still running) — Playground only ever
+    /// has one query in flight at a time.
+    pub playground_transcript: VecDeque<PlaygroundEntry>,
+    pub playground_running: bool,
+    /// Set when the most recently submitted SQL contains a non-`SELECT`
+    /// statement and hasn't been confirmed yet — the execute key doubles as
+    /// the confirm, see `main.rs::handle_playground_key`.
+    pub playground_confirm_pending: bool,
+    /// `Some(i)` while Up/Down is browsing `playground_transcript[i]` into
+    /// the editor (psql/readline's history recall) — `i` counts from the
+    /// front, `None` means the editor holds fresh, unrecalled text.
+    pub playground_history_cursor: Option<usize>,
+    /// Set once if the Playground's dedicated startup connection fails; no
+    /// retry within the session (ponytail: restart to retry).
+    pub playground_conn_error: Option<String>,
+    /// The Playground connection's own backend pid (`AppEvent::PlaygroundPid`)
+    /// — lets Ctrl+C cancel a running query via `PollControl::Cancel`, same
+    /// mechanism the Activity tab's `x` key uses on a selected row.
+    pub playground_pid: Option<i32>,
+    /// The transcript pane's max scroll offset as of the last frame it drew
+    /// (`widgets::draw_scrollable`'s return value) — stashed here so
+    /// `main.rs::handle_playground_key`'s `PageUp`/`PageDown` arms can tell
+    /// "already at the bottom" (pagination's fetch-more trigger) and
+    /// normalize the "pinned to bottom" scroll sentinel, without re-deriving
+    /// layout — same pattern as `detail_pane_rect` above.
+    pub playground_max_scroll: u16,
+    /// `Some` while consecutive Tab presses are cycling through completion
+    /// candidates for the same word — cleared on any other key (see
+    /// `main.rs::handle_playground_key`) or a database switch.
+    pub playground_complete: Option<PlaygroundComplete>,
+
     pub paused: bool,
     /// Current fast-tier poll interval — the only tier `-`/`+` adjust.
     /// Mirrors what's actually in effect in `poll_task`, updated locally on
@@ -293,6 +394,20 @@ impl App {
             queries_sort: QueriesSortColumn::Total,
             activity_state: TableState::default(),
             triggers_state: TableState::default(),
+            detail_scroll: 0,
+            detail_pane_rect: None,
+            detail_popup_open: false,
+            table_pane_rect: None,
+            tab_bar_rect: None,
+            playground_editor: SqlEditor::default(),
+            playground_transcript: VecDeque::new(),
+            playground_running: false,
+            playground_confirm_pending: false,
+            playground_history_cursor: None,
+            playground_conn_error: None,
+            playground_pid: None,
+            playground_max_scroll: 0,
+            playground_complete: None,
             paused: false,
             rate,
             ascii,
@@ -326,6 +441,7 @@ impl App {
         };
         let next = state.selected().map_or(0, |i| (i + 1).min(len - 1));
         state.select(Some(next));
+        self.detail_scroll = 0;
     }
 
     pub fn scroll_up(&mut self) {
@@ -342,6 +458,36 @@ impl App {
         };
         let next = state.selected().map_or(0, |i| i.saturating_sub(1));
         state.select(Some(next));
+        self.detail_scroll = 0;
+    }
+
+    /// Click counterpart of `scroll_down`/`scroll_up` — selects row `idx` on
+    /// whichever tab is active, mirroring their exact bounds-check and
+    /// `detail_scroll` reset. A no-op if `idx` is out of range (e.g. a click
+    /// below the last row into empty pane space) or the active tab has no
+    /// row table.
+    pub fn select_row_at(&mut self, idx: usize) {
+        let len = self.active_row_count();
+        if idx >= len {
+            return;
+        }
+        let state = match self.active {
+            PanelKind::Queries => &mut self.queries_state,
+            PanelKind::Activity => &mut self.activity_state,
+            PanelKind::TablesIndexes => &mut self.tables_state,
+            PanelKind::Triggers => &mut self.triggers_state,
+            _ => return,
+        };
+        state.select(Some(idx));
+        self.detail_scroll = 0;
+    }
+
+    /// Switches the active tab and resets the shared detail-pane scroll
+    /// offset together, so a new tab's detail pane (if it has one) never
+    /// opens mid-scroll from whatever the previous tab left behind.
+    pub fn set_active(&mut self, kind: PanelKind) {
+        self.active = kind;
+        self.detail_scroll = 0;
     }
 
     /// Cycles the sort for the active panel, if it has one (Queries: total
@@ -582,5 +728,20 @@ impl App {
         self.queries_state = TableState::default();
         self.activity_state = TableState::default();
         self.triggers_state = TableState::default();
+        self.detail_scroll = 0;
+        self.detail_popup_open = false;
+        // Draft text and transcript survive a db switch (still meaningful
+        // within the same session). A query still running against the old
+        // connection is left alone too — it's genuinely still executing (the
+        // Playground connection follows independently, see
+        // `main.rs::apply_event`'s `DbSwitched` arm) and will resolve into
+        // its own transcript entry normally; `apply_event`'s
+        // `PlaygroundResult`/`PlaygroundMore` handlers only fill an entry
+        // that's still `None`, so a stale result racing a newer submission
+        // can't clobber it.
+        self.playground_confirm_pending = false;
+        self.playground_history_cursor = None;
+        self.playground_max_scroll = 0;
+        self.playground_complete = None;
     }
 }

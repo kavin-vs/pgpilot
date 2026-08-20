@@ -12,6 +12,8 @@ use crate::ui::{charts, theme, widgets};
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.activity.is_none() {
+        app.detail_pane_rect = None;
+        app.table_pane_rect = None;
         widgets::loading_or_error(frame, area, app, "activity", "Activity");
         return;
     }
@@ -27,11 +29,23 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         ])
         .split(area);
 
+    app.detail_pane_rect = Some(rows[2]);
+    app.table_pane_rect = Some(rows[1]);
     draw_summary_cards(frame, rows[0], app);
     draw_activity_table(frame, rows[1], app);
     draw_detail(frame, rows[2], app);
     draw_blocking_tree(frame, rows[3], app);
     draw_lock_strip(frame, rows[4], app);
+}
+
+/// Full-screen zoom of `draw_detail`, opened by clicking the inline pane
+/// (`App::detail_popup_open`) — see `queries::draw_detail_popup`. Especially
+/// useful here since this pane's fixed `Length(6)` height clips even a
+/// modest query most of the time.
+pub(crate) fn draw_detail_popup(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    frame.render_widget(ratatui::widgets::Clear, area);
+    draw_detail(frame, area, app);
 }
 
 fn draw_summary_cards(frame: &mut Frame, area: Rect, app: &App) {
@@ -123,8 +137,9 @@ fn draw_activity_table(frame: &mut Frame, area: Rect, app: &mut App) {
 /// `queries.rs`'s `draw_detail` shape — not an `enter`-triggered popup. The
 /// table's own query column is usually narrower than the 220-char
 /// server-side cap (see `db::activity`), so this is where the full text
-/// actually becomes readable; long text just gets clipped by the pane's
-/// height, same no-scroll ceiling `queries.rs`'s detail pane already has.
+/// actually becomes readable; scrolls via `PageUp`/`PageDown`
+/// (`widgets::draw_scrollable`) since this pane's fixed `Length(6)` height
+/// clips even a modest query most of the time.
 fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     let Some(activity) = &app.activity else {
         return;
@@ -152,8 +167,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     ];
     lines.extend(text.lines().map(|l| Line::from(l.to_string())));
 
-    let block = theme::block("Selected Backend").border_style(Style::default().fg(theme::BORDER_DETAIL));
-    frame.render_widget(Paragraph::new(lines).block(block).wrap(ratatui::widgets::Wrap { trim: false }), area);
+    widgets::draw_scrollable(frame, area, "Selected Backend", lines, app.detail_scroll);
 }
 
 fn draw_blocking_tree(frame: &mut Frame, area: Rect, app: &App) {

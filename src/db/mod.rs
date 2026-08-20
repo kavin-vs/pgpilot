@@ -14,6 +14,7 @@ pub mod cache_io;
 pub mod connections;
 pub mod databases;
 pub mod indexes;
+pub mod playground;
 pub mod serverinfo;
 pub mod statements;
 pub mod tables;
@@ -205,7 +206,7 @@ async fn poll_fast_with_reconnect(
 /// its `source()` chain. Unlike `anyhow::Error` (whose alternate `{:#}`
 /// format walks the chain for us), a raw `tokio_postgres::Error` needs this
 /// walked by hand.
-fn chained_message(e: &tokio_postgres::Error) -> String {
+pub(crate) fn chained_message(e: &tokio_postgres::Error) -> String {
     let mut parts = vec![e.to_string()];
     let mut source = std::error::Error::source(e);
     while let Some(s) = source {

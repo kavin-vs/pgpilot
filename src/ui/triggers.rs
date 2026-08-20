@@ -11,10 +11,14 @@ use crate::ui::{charts, theme, widgets};
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.triggers.is_none() {
+        app.detail_pane_rect = None;
+        app.table_pane_rect = None;
         widgets::loading_or_error(frame, area, app, "triggers", "Triggers");
         return;
     }
     if app.triggers.as_ref().unwrap().is_empty() {
+        app.detail_pane_rect = None;
+        app.table_pane_rect = None;
         let widget = Paragraph::new("no user-defined triggers in this database")
             .style(Style::default().fg(theme::TEXT_DIM))
             .block(theme::block("Triggers"));
@@ -27,8 +31,20 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         .constraints([Constraint::Min(8), Constraint::Percentage(35)])
         .split(area);
 
+    app.detail_pane_rect = Some(rows[1]);
+    app.table_pane_rect = Some(rows[0]);
     draw_table(frame, rows[0], app);
     draw_detail(frame, rows[1], app);
+}
+
+/// Full-screen zoom of `draw_detail`, opened by clicking the inline pane
+/// (`App::detail_popup_open`) — see `queries::draw_detail_popup` (same
+/// shape, mirrored per-tab since each tab's `draw_detail` builds different
+/// content).
+pub(crate) fn draw_detail_popup(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    frame.render_widget(ratatui::widgets::Clear, area);
+    draw_detail(frame, area, app);
 }
 
 fn draw_table(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -72,9 +88,8 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &mut App) {
 
 /// Mirrors `queries.rs`'s `draw_detail` — an always-visible pane for
 /// whichever row is highlighted, not an `enter`-triggered popup. Long
-/// function bodies simply get clipped by the pane's height, same ceiling
-/// `queries.rs`'s own detail pane already has for a long query; no scrolling
-/// in either.
+/// function bodies scroll via `PageUp`/`PageDown` (`widgets::draw_scrollable`)
+/// rather than being clipped by the pane's height.
 fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     let Some(rows) = &app.triggers else {
         return;
@@ -92,6 +107,5 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     ];
     lines.extend(row.function_def.lines().map(|l| Line::from(l.to_string())));
 
-    let block = theme::block("Selected Trigger").border_style(Style::default().fg(theme::BORDER_DETAIL));
-    frame.render_widget(Paragraph::new(lines).block(block).wrap(ratatui::widgets::Wrap { trim: false }), area);
+    widgets::draw_scrollable(frame, area, "Selected Trigger", lines, app.detail_scroll);
 }

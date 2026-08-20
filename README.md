@@ -128,7 +128,7 @@ cargo uninstall pgpilot
 ## 3. Interactive Mode (Tabs)
 
 Running `pgpilot` launches straight into the dashboard — there's no non-interactive
-query mode, the TUI *is* the product. Five tabs, switched with `1`–`5`:
+query mode, the TUI *is* the product. Six tabs, switched with `1`–`6`:
 
 | Key | Tab | What's in it |
 |---|---|---|
@@ -137,6 +137,7 @@ query mode, the TUI *is* the product. Five tabs, switched with `1`–`5`:
 | `3` | Activity | Connection-state summary cards, the full `pg_stat_activity` list (selectable) with an always-visible detail pane for the selected backend, a blocking tree, and a lock/transaction summary |
 | `4` | Tables & Indexes | Schema size totals, a table list (dead-tuple %, xid age, seq-scans/hour, last autovacuum), unused/invalid indexes (with reclaimable size), and missing-index candidates (unindexed foreign keys, high seq-scan-ratio tables) |
 | `5` | Triggers | Every user-defined trigger (`pg_trigger`, excluding internal foreign-key-backing ones) — schema, table, function, enabled/disabled state — with an always-visible detail pane showing that trigger's DDL (`pg_get_triggerdef`) and its function's full source (`pg_get_functiondef`) |
+| `6` | Playground | A psql-style REPL against the live connection, on its own dedicated database connection so a slow query here never freezes the other tabs' live monitoring. The transcript and live input share one bordered box, no seam between output and input. A scrolling transcript (`dbname=>` prompts, a plain `->` for continuation lines) shows every command run this session; `enter` runs a `;`-terminated statement, otherwise starts a continuation line. Non-`SELECT` statements need a second `enter` to confirm before they run; `tab` completes SQL keywords/schema/table names (cycling on repeat); `ctrl-c` cancels a running query (or clears the buffer if nothing's running); `↑`/`↓` recall history inline. Result tables match real `psql`'s own aligned format. A single bare `SELECT` loads 200 rows at a time — scroll (`PageDown`) to the bottom to fetch the next page, same idea as DBeaver's chunked fetch. A handful of readline/nvim-insert-mode chords (`ctrl-w`/`u`/`k`, word/buffer jumps) round out the editor — see §7. The transcript and drafts are in-memory only — nothing is written to disk |
 
 ---
 
@@ -299,8 +300,13 @@ instead of leaving you to notice the raw numbers yourself.
 
 | Key | Action |
 |---|---|
-| `1`–`5` | Switch tab |
+| `1`–`6` | Switch tab |
 | `↑`/`↓` or `j`/`k` | Scroll/select rows on the current tab (Queries, Activity, Tables & Indexes, Triggers) |
+| `PageUp` / `PageDown` | Scroll the detail pane's text (Queries, Activity, Triggers, and Playground's transcript) when it overflows the pane |
+| Mouse wheel | Scroll the detail pane under the cursor (Queries, Activity, Triggers — also works once it's zoomed into a full-screen popup) or the Playground transcript (whenever that tab is active, regardless of cursor position) |
+| Click a row | Select it (Queries, Activity, Tables & Indexes, Triggers) — same effect as moving `j`/`k` onto it |
+| Click a tab | Switch to it — same effect as its `1`–`6` key |
+| Click detail pane | Zoom the detail pane (Queries, Activity, Triggers) into a full-screen popup — `esc`/`q` closes it, `PageUp`/`PageDown`/mouse wheel still scroll while it's open |
 | `s` | Cycle sort (Queries: total time → mean time → calls → disk I/O; Tables & Indexes: size/name, press again to reverse) |
 | `x` / `X` | Cancel / terminate the selected Activity row's backend (`pg_cancel_backend`/`pg_terminate_backend`) — real, immediate, no confirmation prompt, same spirit as `htop`'s kill. Requires the `pg_signal_backend` role (or superuser); otherwise the attempt fails with a status message, not a crash |
 | `space` | Pause/resume polling |
@@ -314,6 +320,40 @@ instead of leaving you to notice the raw numbers yourself.
 `d` only shows up (and works) when connected via a saved profile or
 `--host`/`--user`/etc. flags — a raw `--dsn` connection string can't be safely rewritten
 to point at a different database, so switching is unavailable in that mode.
+
+**The Playground tab is a psql-style REPL**: a scrolling transcript of every command you've run this
+session (`dbname=>` for the first line of a statement, a plain `->` for a continuation line — no
+repeated database name, unlike real `psql`'s own prompt), with the live input pinned below it — both
+render inside one shared bordered box, so there's no seam between output and input, matching a real
+terminal. The editor captures every plain key (so typing SQL never triggers the
+shortcuts above) — only these do something else:
+
+| Key | Action |
+|---|---|
+| `enter` | Runs the current statement once it ends in `;` (psql's own rule) — otherwise inserts a newline for a continuation line (shown with the `->` prompt). On a non-`SELECT` statement, the first press shows a confirm warning instead of running; press it again to actually execute |
+| `F5` / `ctrl-enter` / `cmd-enter` | Force-run whatever's in the buffer right now, regardless of a trailing `;` — an escape hatch for the rare case the `;`-completeness check doesn't fire when you expect (e.g. it doesn't understand a `;` inside a string literal). `ctrl-enter`/`cmd-enter` need a terminal that supports the Kitty keyboard protocol (kitty, WezTerm, Ghostty, newer iTerm2, etc.) — `F5` always works, everywhere |
+| `tab` | Completes the SQL keyword/schema/table name before the cursor (e.g. `SEL` → `SELECT`, `use` → `users`, `aud` → `"Audit"` for a schema that needs quoting) — press again to cycle through other matches |
+| `ctrl-c` | psql's own dual-purpose binding: cancels a running query (`pg_cancel_backend` under the hood), or — if nothing's running — discards whatever's currently typed (including a multi-line continuation) and gives you a fresh prompt |
+| `↑` / `↓` | At the top/bottom row of the current input, recalls the previous/next command from this session's history into the editor (readline-style); mid-buffer they still just move the cursor, so editing a multi-line query works normally |
+| `ctrl-q` | Quit (plain `q` is left free to type, e.g. `...FROM queue`) |
+| `esc` | Leave the tab (back to Overview) — or, if a confirmation is pending, back out of that first |
+| `PageUp` / `PageDown` | Scroll the transcript |
+
+A few readline/nvim-insert-mode-style chords are also available for editing, since the editor itself
+stays non-modal (no normal/insert mode to switch between — see `src/editor.rs`):
+
+| Key | Action |
+|---|---|
+| `ctrl-w` | Delete the word before the cursor |
+| `ctrl-u` | Delete from the cursor to the start of the line |
+| `ctrl-k` | Delete from the cursor to the end of the line |
+| `ctrl-←` / `ctrl-→` | Jump a word left/right (nvim's `b`/`w`) |
+| `ctrl-Home` / `ctrl-End` | Jump to the start/end of the buffer (nvim's `gg`/`G`) |
+
+pgpilot enables mouse reporting for the click/scroll interactions above, which is also what most
+terminals use to gate native click-drag text selection — copying text out via your terminal's own
+selection may need a modifier-held drag (e.g. Option-drag in Terminal.app/iTerm2) while pgpilot is
+running, depending on your terminal.
 
 ---
 
@@ -393,12 +433,28 @@ matching requests; no setup needed.
 
 ## 11. Scope
 
-In: the five tabs above, the diagnosis popup, saved connection profiles
-(list/add/edit/pick, SSL/mutual-TLS), the database picker, cancel/terminate.
+In: the six tabs above (including Playground, a psql-style REPL on its own dedicated
+connection), the diagnosis popup, saved connection profiles (list/add/edit/pick,
+SSL/mutual-TLS), the database picker, cancel/terminate.
 
 Out of scope (candidates for future versions): deleting a saved profile in place
 (listing, adding, and editing are all supported), true time-windowed wait-event
 profiling (current sampling is a bounded recent-window point-sample, not
-`pg_wait_sampling`-grade), and query-plan-derived index suggestions (missing-index
+`pg_wait_sampling`-grade), query-plan-derived index suggestions (missing-index
 candidates are limited to two mechanically-derivable heuristics — unindexed foreign keys
-and high seq-scan-ratio tables — not fabricated column-level `CREATE INDEX` guesses).
+and high seq-scan-ratio tables — not fabricated column-level `CREATE INDEX` guesses), and
+— for Playground — persisting the transcript/drafts to disk, full vim modal editing (normal/insert/
+visual modes — the editor stays non-modal, with a handful of readline/nvim-insert-mode chords
+instead, see §7), real SQL tokenization for the confirm-guard's statement split and the
+`enter`-runs-on-`;` completeness check (both a naive top-level `;` split today, which doesn't
+understand semicolons inside string/dollar-quoted literals), pagination for anything beyond a
+single bare `SELECT` (multi-statement scripts, `WITH`, DML/DDL still fetch everything in one
+shot — the current pagination is stateless LIMIT/OFFSET re-fetching, not a held server-side
+cursor, so very deep scrolling on an expensive query re-runs it from scratch each page), the
+literal Postgres command tag on a non-`SELECT` result (shows a row count, not `psql`'s
+`CREATE TABLE`/`UPDATE 3` text — the underlying driver API doesn't expose it), and matching
+`psql`'s blank-for-`NULL` default (kept as literal `NULL` text on purpose — `psql`'s own
+default makes `NULL` and an empty string look identical, a well-known footgun). Tab-completion
+covers SQL keywords, schema names, and table names only — no column-name completion (no existing
+data source for full column lists), and no DBeaver-style dropdown popup (inline cycling instead —
+see §7).

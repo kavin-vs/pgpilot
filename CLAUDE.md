@@ -16,8 +16,7 @@ Design plans (v1 dashboard: crate choices, SQL, async architecture; rename + sav
 - Run: `cargo run -- [flags]` (e.g. `cargo run -- --dbname postgres`)
 - Check without building: `cargo check`
 - Lint: `cargo clippy`
-
-No test suite exists yet.
+- Test: `cargo test`
 
 Build requirement (resolved): TLS used to default to `aws-lc-sys` (rustls's default crypto provider), which compiles a C library via `cmake` and needs `cmake` + a C compiler on `PATH`. That was fine on the one dev machine this ran on, but broke down once release CI needed to cross-build for `windows-latest` — GitHub's Windows runner image doesn't ship NASM, which `aws-lc-sys` wants for its assembly path. `Cargo.toml` now pins `rustls`/`tokio-postgres-rustls` to the `ring` crypto backend instead (`default-features = false, features = ["ring", "std", "tls12", "logging"]` / `features = ["ring"]`) — `ring` only needs a plain C compiler, which every platform's Rust toolchain already has, so all 4 release targets (see Release below) build with zero extra CI setup. No code changes were needed for the swap: `src/db/tls.rs` never calls `CryptoProvider::install_default()` explicitly, it relies on rustls's "exactly one crypto feature compiled in" implicit default, which works the same regardless of which backend that one feature is. Verified end-to-end against a throwaway local Postgres with `ssl = on` and a real (non-CA) self-signed cert, both the accept-any-cert (`--ssl`) and CA-verified (`--ssl --ssl-root-cert`) paths.
 
@@ -39,6 +38,514 @@ For cases 2–3, TLS comes from the resolved `Profile`'s ssl fields, and passwor
 `--interval <secs>` sets the dashboard poll interval (default `2`), independent of connection resolution.
 
 ## Architecture
+
+**v16**: mouse-wheel scroll and click extended to the rest of the app — wheel scrolling on all 4
+scrollable panes (previously `PageUp`/`PageDown`-only), clicking a table row to select it (previously
+keyboard-only, an explicit v10 ceiling: "clicking a table row does nothing"), and clicking a tab to
+switch (previously `1`-`6`-only). Direct user request, following straight from v10's original mouse
+support. No new terminal negotiation needed — `EnableMouseCapture` (`main.rs`, since v10) already
+reports `MouseEventKind::ScrollUp`/`ScrollDown` once wired, confirmed against crossterm 0.29's
+vendored source.
+
+**Scroll**: `handle_mouse` (`main.rs`) is restructured into `handle_mouse_scroll`/`handle_mouse_click`,
+dispatched on `mouse.kind`. The overlay guard changed in one specific way: `detail_popup_open` (the
+zoomed-detail-pane state) used to block *all* mouse input; it now blocks only the click branch (click
+must stay a no-op while already zoomed, unchanged) — scroll passes through, since the zoomed popup
+*is* the pane and the wheel should keep scrolling it exactly like `PageUp`/`PageDown` already do while
+zoomed. For Queries/Activity/Triggers, scroll is hit-tested against the existing
+`App::detail_pane_rect` (reused as-is, no new `Rect`) unless zoomed, in which case there's nothing to
+hit-test (full screen). Playground's transcript has no stored `Rect` (unlike the 3 detail panes) —
+scroll applies unconditionally whenever that tab is active rather than adding one just for this
+(`ponytail:` comment at the call site). Playground's wheel-down/up reuse the *exact* logic
+`PageDown`/`PageUp` already had, extracted into `playground_scroll_down`/`playground_scroll_up`
+(`main.rs`) so the fetch-more pagination trigger (v13) and the pinned-to-bottom sentinel
+normalization (v14) aren't duplicated — `handle_playground_key`'s `PageUp`/`PageDown` arms now just
+call these. A new `MOUSE_SCROLL_STEP: u16 = 3` (vs. `DETAIL_SCROLL_STEP`'s 5, sized for a keyboard
+page-jump) is used for the non-Playground wheel step; Playground's own wheel step stays
+`DETAIL_SCROLL_STEP` since only the fetch-more/sentinel *logic* needed sharing, not the step size — a
+judgment call, trivial to change if a smaller wheel step there is wanted too. `handle_mouse` gained a
+`playground_tx: &mpsc::Sender<PlaygroundControl>` parameter (needed for the fetch-more trigger) — its
+one call site in the event loop now threads it through, mirroring how `handle_key` already does.
+
+**Row click-select**: new shared `App::table_pane_rect: Option<Rect>` mirrors `detail_pane_rect`
+exactly (stashed every frame by each tab's own `draw()`, `None` on early-return/no-data states) —
+written by Queries/Activity/Triggers (alongside their existing `detail_pane_rect`) and, new for this
+tab, Tables & Indexes (which has no detail pane, so this is its first tracked `Rect`). New
+`App::select_row_at(idx)` mirrors `scroll_down`/`scroll_up`'s exact bounds-check and `detail_scroll`
+reset — the click counterpart of moving `j`/`k` onto a row. Row-index-from-click math
+(`main.rs::row_index_at`) accounts for a fixed 2-row offset (1 border + 1 header) before the first
+data row — true for all 4 tables since they all go through `theme::block()` (border on all sides) +
+`.header()` with default row height 1 and no margins, verified against each table's own construction,
+no per-table special-casing needed — plus the table's current scroll offset
+(`ratatui::widgets::TableState::offset()`), so clicking a row that's scrolled into view still resolves
+to the right data index, not just the right on-screen position.
+
+**Tab click-switch**: new `App::tab_bar_rect: Option<Rect>`, the first *unconditionally*-every-frame
+`Rect` (the tab bar is always on screen, unlike the other three which are `None` in various empty/
+loading states) — written once in `ui/mod.rs::draw()` right after the top-level layout split.
+`main.rs::tab_index_at` hit-tests it with an **equal-width approximation**, not an exact one:
+`ratatui::widgets::Tabs` has no public API for per-segment rendered bounds (its own layout fn is
+private, confirmed against vendored `ratatui-widgets` source) — a `ponytail:` comment discloses that a
+click near a tab boundary can land one tab off since real titles vary in width ("Tables & Indexes" vs.
+"Queries"), with summing the exact title+divider+padding widths by hand as the upgrade path if that
+ever matters enough. Click action is the same `App::set_active(PanelKind::ALL[idx])` the `1`-`6` keys
+already call, so tab-click and digit-key are behaviorally identical (including the `detail_scroll`
+reset `set_active` already does).
+
+Click precedence in the combined `handle_mouse_click`: tab bar, then the active tab's table (row
+select), then its detail pane (zoom) — checked in that order since the three `Rect`s never overlap
+(tab bar sits in its own top-level layout row, table/detail panes both live within the content row
+below it), so a click matches at most one. 13 new `#[cfg(test)]` cases cover scroll/click boundary
+conditions (inside/outside a pane, while zoomed, while another overlay is open, border/header rows,
+out-of-range clicks, the Playground fetch-more/sentinel paths) alongside the 4 pre-existing
+click-to-zoom tests, all now threading a throwaway `mpsc::channel` for `playground_tx`.
+
+**v15**: two more Playground refinements, both direct user requests — a single unified block instead
+of two separately-bordered transcript/input boxes, and Tab-triggered autocomplete for SQL keywords/
+schema/table names. History (Up/Down) recall, requested in the same message, turned out to already be
+fully shipped since v14 (`main.rs::playground_history_prev`/`playground_history_next`) — reverified
+live after this pass, no code change needed there.
+
+**Unified block**: `ui/playground.rs::draw()` previously rendered the transcript through
+`widgets::draw_scrollable`, which wraps its content in its own bordered+titled `Block` — the live
+input below it, drawn by `draw_input()`, was a bare borderless `Paragraph` with no `.block()` call at
+all. So the tab was one bordered box (transcript) sitting directly above one borderless box (input), a
+visible seam — not "the same like psql," a single continuous scrollback-plus-prompt view. Fixed by
+extracting `draw_scrollable`'s wrap/clamp/`Paragraph`-building logic into a new
+`pub(crate) fn widgets::scrollable_paragraph(lines, width, height, scroll) -> (Paragraph, clamped,
+total, max_scroll)` — `draw_scrollable` itself now just calls this and wraps the result in its own
+block, so its signature/behavior (and all 4 existing call sites on Queries/Triggers/Activity, plus
+their tests) are completely unchanged. `ui/playground.rs::draw()` now builds one outer
+`theme::block(title)` (the title carrying the same `[a-b/N]  PgUp/PgDn` scroll-position indicator
+`draw_scrollable` used to show), renders it once over the full tab area, then splits its `.inner(area)`
+into the transcript/input rows and renders both directly with no nested block of their own. Verified
+live via a tmux-driven session against a throwaway PG14 instance — the transcript and the live input
+prompt now render flush inside one border, no seam.
+
+**Autocomplete**: new pure module `src/completion.rs` (no I/O, `#[cfg(test)]`-covered, same shape as
+`diagnosis.rs`/`format.rs`) — `KEYWORDS`, a hand-rolled const list (no reserved-keyword list existed
+anywhere in the codebase to reuse — confirmed by grep before writing it); `quote_ident(name)`, real
+Postgres identifier quoting (`^[a-z_][a-z0-9_]*$` passes through unquoted, anything else gets
+`"..."` with embedded `"` doubled) — the "valid format" part of the ask, so whatever gets inserted is
+always safe to run as-is; `word_before_cursor(line, cursor_col)`, scanning backward over
+identifier-or-`.` characters — a standalone char class, deliberately *not* reusing `editor.rs`'s own
+private `is_word_char` (Ctrl+W's word-boundary rule shouldn't also start treating `.` as a word
+character); `candidates(prefix, tables: Option<&TablesData>)`, case-insensitive prefix matching over
+keywords + unqualified table names + `schema.table` for non-`public` schemas (a typed `schema.tab`
+prefix is split on its last `.` and each half matched separately), capped at 50. Reuses `App.tables`
+(`src/app.rs`) as-is — the slow-tier `TablesData` snapshot already populated every 5 minutes by the
+*main* polling connection regardless of the active tab (see the v11 note on why Playground has its own
+separate connection) — no new SQL, poll tier, or connection, and no fuzzy-matching dependency (prefix-
+only, consistent with the rest of the app's naive-heuristic style).
+
+Trigger is **Tab**, previously unbound (fell through to the catch-all no-op) — bash/readline-style
+inline completion, not a DBeaver-style dropdown popup; asked the user directly which UX they wanted,
+and inline-cycle was the explicit, confirmed choice (smallest diff, no new rendering surface, reuses
+the existing input `Paragraph` as-is). `main.rs::playground_autocomplete()` extracts the word before
+the cursor via `completion::word_before_cursor`, and either advances a cycle already in progress
+(`App::playground_complete: Option<PlaygroundComplete>` — `{row, start_col, candidates, index}`,
+matched on `row`+`start_col` so an edit or cursor move elsewhere starts fresh) or computes a fresh
+candidate list and inserts the first match via a new `SqlEditor::replace_current_word(start_col,
+replacement)` (splices `[start_col, cursor_col)` on the current line, cursor moves to the end of the
+inserted text). `handle_playground_key` clears `playground_complete` on any key other than Tab (so
+cycling only continues across *consecutive* Tab presses) and `on_db_switched()` resets it too (a
+switched database can have a different schema, so a stale cycle shouldn't survive). Disclosed
+ceilings: cycling doesn't continue past a quoted candidate (the closing `"` isn't a word character, so
+the next Tab can't re-recognize the inserted text as the same word — the first completion is still
+correct, only *continued* cycling on an already-quoted name is affected); column-name completion is
+out of scope (no existing data source beyond the narrow FK-column list in `UnindexedForeignKey`, only
+keywords/schemas/tables complete); candidates reflect the slow tier's up-to-5-minute staleness, same
+as `App::tables_rates`. Verified live end-to-end via a tmux-driven session against a throwaway PG14
+instance: typed `select * from us<Tab>` cycled `user_sessions` → `users`; typed `select * from
+aud<Tab>` against a real mixed-case `"Audit"` schema completed to `"Audit".log` (quoted correctly, and
+the query ran successfully against it); typed `sel<Tab>` completed to `SELECT`.
+
+**Continuation-prompt follow-up** (same v15 pass, direct user report with a screenshot): a
+continuation line (typed without a trailing `;`, buffered as part of the same statement — real psql's
+own behavior, unchanged) used to repeat the database name on every line (`dbname-> `, matching real
+psql's own `PROMPT2`). A user hit this concretely: stray text (`hi`) typed at the prompt, followed by
+`enter`, buffered as a continuation rather than erroring immediately (correct, matches psql), then a
+real query typed on the next line merged with it into one statement and errored on `"hi"` — confusing
+specifically because the repeated `dbname-> ` prefix made the continuation line look like *another
+fresh prompt*, not obviously "still part of the statement above." Fixed by dropping the repeated
+database name on continuation lines — they now show a plain `-> ` instead of `dbname-> `, a deliberate
+divergence from strict psql-mimicry (a direct, explicit user preference, confirmed over 2 rounds of
+clarifying questions) rather than a bug in the merge-into-one-statement behavior itself, which is
+unchanged and still intentional. `ui/playground.rs` gained one shared `prompt_marker(prompt, i) ->
+String` (`i == 0` → `"{prompt}=> "`, else → `"-> "`) used by both `push_echo` (transcript echo) and
+`draw_input` (live input) so the two can't drift apart. `draw_input`'s cursor-column math
+(`prefix_width`) had been a single constant computed once per frame (`prompt.len() + 3`, correct only
+because every line used to share the same prefix width) — now computed from `prompt_marker`, evaluated
+against whichever row the cursor is actually on, since a continuation row's prefix is narrower than
+the first row's. Verified live: typing on a continuation line and confirming the terminal cursor still
+lands exactly at the end of the typed text, not offset by the old (wider) prefix assumption.
+
+**v14**: Playground rewritten from a form ("SQL" box + "Output" box, F5-to-run) into a psql-style
+REPL, on direct user feedback that the split-pane/execute-key UX "doesn't suit us" and should "follow
+the same like psql does." Three structural changes: (1) **transcript, not a single result slot** —
+`App::playground_result: Option<Result<...>>` (one-shot, overwritten each run) became
+`App::playground_transcript: VecDeque<PlaygroundEntry>` (`{sql, result: Option<...>, has_more,
+fetching_more}`, capped at `PLAYGROUND_HISTORY_CAP` same as the old flat history queue it replaces) —
+every past command stays visible, scrollable, exactly like a real terminal's scrollback, rather than
+being replaced by the next one. `ui/playground.rs::draw()` now renders two regions: a scrollable
+transcript (region A, `widgets::draw_scrollable` — unchanged widget, full reuse) built by
+`transcript_lines()` (echoes each entry's SQL with `dbname=>`/`dbname->` prompt-prefixed lines via
+`push_echo()`, then its result/error/a running-spinner line), and a fixed-to-content live input area
+below it (region B, `draw_input()` — deliberately *not* routed through `draw_scrollable`, since exact
+non-wrapped cursor math is needed for `frame.set_cursor_position` and mixing that with wrapped
+transcript text in one widget isn't reliably positionable; same "no wrap, known ceiling" tradeoff
+`draw_editor` already accepted pre-rewrite). "Pinned to bottom" auto-scroll reuses `draw_scrollable`'s
+own clamp-to-max behavior with zero new widget code: `handle_playground_key` sets
+`app.detail_scroll = u16::MAX` on any key except PageUp/PageDown (verified against
+`draw_scrollable`'s existing over-large-scroll clamp test), and PageUp normalizes that sentinel via
+the previous frame's stashed `playground_max_scroll` before subtracting (`u16::MAX - step` would
+otherwise still clamp straight back to the bottom next frame and never actually move). (2) **Enter
+runs on `;`, not a dedicated key** — `main.rs::playground_enter` (the new plain-`Enter` handler)
+inserts a newline unless `app.playground_editor.text().trim_end().ends_with(';')`, matching psql's
+own completeness rule (ponytail: same naive-`;`-split disclosed limitation `split_statements`
+already carries — doesn't understand a `;` inside a string/dollar-quoted literal). F5/Ctrl+Enter/
+Cmd+Enter (`playground_execute`, unchanged internally) stay as a manual force-run escape hatch for
+when that heuristic under/over-shoots — real psql has no equivalent, but removing the old-and-proven
+override for a heuristic's rare edge case wasn't worth the regression. The confirm-guard
+(`needs_confirmation`) is untouched logic-wise, just relocated: the warning now renders under the
+live input (`draw_input`) instead of blanking the old separate Output pane, so prior results stay
+visible while a confirmation is pending — an incidental improvement, not the point of the change.
+(3) **Ctrl+C now also clears the buffer** — previously scoped to "cancel a running query" only;
+`playground_cancel` gained an `else` branch (nothing running -> reset `playground_editor`/
+`playground_confirm_pending`/`playground_history_cursor`) since real psql's Ctrl+C is dual-purpose
+(cancel when something's running, discard a typed-into-a-corner multi-line buffer otherwise) — caught
+by hand-testing the rewrite against a real psql session side by side, not the original ask, but a
+direct consequence of "follow the same like psql does." Up/Down history recall
+(`main.rs::playground_history_prev/next`, `App::playground_history_cursor: Option<usize>` indexing
+`playground_transcript` from the front) only fires at the buffer's top/bottom row
+(`editor.cursor_row() == 0` / `== lines().len() - 1`) — mid-buffer they still move the cursor, matching
+real readline's own multi-line-input behavior, and needed a new `SqlEditor::set_text()` (replace the
+whole buffer, cursor at end) that didn't exist before (every prior editor method mutated in place).
+ponytail: unlike full readline, editing a recalled entry and then pressing Up/Down again discards
+those in-place edits rather than preserving an "unsaved" slot. Result tables were also reformatted to
+match psql's actual output byte-for-byte (verified against a real local `psql` session, not memory):
+`|`-separated columns, a `-----+------` dashes-and-plus underline, and numeric columns right-aligned
+(`ui/playground.rs::column_is_numeric` — sniffs whether every non-`NULL` value in a column parses as
+`f64`, since `simple_query`'s text-only protocol doesn't expose real column type OIDs the way psql's
+own type-based alignment relies on; ponytail heuristic, disclosed false-positive/negative cases in the
+function's own doc) and the row-count line changed from `"N row(s)"` to psql's literal `"(N row)"`/
+`"(N rows)"`. Deliberately *not* copied from real psql: NULL still renders as literal `NULL` text
+(psql's actual default is a blank cell — a well-known psql footgun, indistinguishable from an empty
+string; keeping it visible was a judgment call, not an oversight) and `StatementResult::Command`
+still can't show the real command tag ("CREATE TABLE", "UPDATE 3") since `tokio_postgres::
+SimpleQueryMessage::CommandComplete` only ever carries the trailing row-count `u64` — confirmed by
+reading `tokio-postgres`'s own `extract_row_affected()`, which throws the tag text away; recovering it
+would mean bypassing `Client::simple_query()` for raw protocol messages, out of scope for this pass.
+Pagination (v13) needed no new mechanism, only re-scoping from flat `App` fields
+(`playground_has_more`/`playground_fetching_more`) to per-`PlaygroundEntry` ones, since the
+scrolled-to-bottom-of-the-transcript check is now equivalent to the old scrolled-to-bottom-of-Output
+check (the paginated entry is always the last/bottommost one, by construction — pagination state is
+tied to "whatever was most recently run"). `apply_event`'s `PlaygroundResult`/`PlaygroundMore`
+handlers gained a defensive guard (`entry.result.is_none()` / degrade-to-no-op) against a stale result
+racing a newer submission after a db switch — a real gap the old one-shot-`Option` model didn't have
+to consider (see `App::on_db_switched`'s own updated doc comment for why the in-flight state is now
+deliberately *not* reset on switch, unlike before). The Ctrl+H history-popup overlay
+(`App::playground_history_open`, `ui/playground.rs::draw_history`) is gone entirely — superseded by
+inline Up/Down recall plus natural scrollback, matching how a real terminal has no separate "history
+window" either. One incidental correctness fix while rewriting the key-match anyway: the catch-all
+`KeyCode::Char(c) => insert_char` arm previously had no modifier guard, so any *unbound* Ctrl+letter
+combo (not one of the explicitly handled ones) would insert that letter literally into the buffer;
+it's now `KeyCode::Char(c) if !modifiers.contains(CONTROL)`, with a `_ => {}` catch-all absorbing the
+rest.
+
+**v13**: a crash fix and a pagination feature, both from a single direct user report — `SELECT *
+FROM <table>` on a table with one large cell panicked the whole app ("Formatting argument out of
+range" at `src/ui/playground.rs:154`) and left the terminal in a corrupted state, and the user
+separately asked for DBeaver-style pagination since a large result set was fetched and buffered in
+full with no cap.
+
+Root cause of the panic: `build_result_lines`' `widths` computation sized each column to the
+longest cell's *byte* length (`.len()`), then `pad_row` fed that straight into a dynamic `format!`
+width (`{c:<w$}`) — Rust's format machinery stores dynamic widths as a `u16` internally (confirmed
+against `core::fmt::rt::Argument::from_usize`) and panics the instant any single cell exceeds 65,535
+bytes (a >64KB `text`/`jsonb`/`bytea`-hex value). Fixed at the one shared point every `pad_row` call
+already routes through: `ui/playground.rs::truncate_cell()` char-safely caps a cell's *displayed*
+text at `CELL_MAX_CHARS` (200) with a trailing `…`, and `cell_text()`/the header line both route
+through it before width is ever computed — bounding every dynamic width far below the panic
+threshold regardless of what's fetched. Caught and fixed a second, related bug in the same pass while
+touching this code: `format!("{:<w$}")` pads by *character* count (confirmed against
+`core::fmt::Formatter::pad`), but `w` was computed from `.len()` (bytes) — any cell with multi-byte
+UTF-8 already misaligned columns, independent of the panic; the width computation now uses
+`.chars().count()` throughout.
+
+Terminal corruption was a separate, related gap: `ratatui::init()` already installs a panic hook
+that restores raw-mode/leaves the alt screen, but `EnableMouseCapture` and the Kitty
+keyboard-enhancement flags (`main.rs`, enabled right after `init()`) were explicitly *not* wired into
+that restore — a documented, deliberate ceiling from when Playground's mouse/Kitty support first
+landed ("known, low-severity ceiling... not worth a custom panic hook for it"). Revisited now that a
+real crash proved it matters: `main.rs` installs a second panic hook (via `std::panic::take_hook`/
+`set_hook`, after `kitty_keyboard` is known) that disables mouse capture and pops the Kitty flags
+(best-effort, guarded on `kitty_keyboard`) before delegating to whatever hook `ratatui::init()`
+installed — cleanup-first-then-delegate, so the extra escape codes land while the alt-screen buffer
+(about to be cleared) is still active, not the now-visible normal screen. Disclosed: `set_hook` is
+process-global, so a panic inside a background task (`playground_task`/`poll_task`) fires this too,
+mid-session, even though the app keeps running — harmless (idempotent cleanup), not fixed further.
+
+Pagination ("scroll for more", DBeaver's own chunked-fetch UX as the named reference) is
+**stateless LIMIT/OFFSET re-execution via subquery wrapping**, not a held server-side cursor —
+deliberately: a held cursor needs an open transaction (or `WITH HOLD`, which still holds a
+materialized result in backend memory), and an open transaction holds back the cluster-wide vacuum/
+xmin horizon for *every* connection on the server, not just this one; stateless re-fetch avoids that
+entirely and needs no cleanup on tab-away/db-switch/disconnect beyond what already existed. Scoped to
+the common case only: `db/playground.rs::is_single_paginatable_select()` requires the submitted SQL
+be *exactly one* statement (via the existing `split_statements()`) whose trimmed text is a bare
+`SELECT` — deliberately **not** `WITH`, even though `is_read_only_statement()` (the older,
+unrelated confirm-guard classifier) already treats `WITH` as read-only: a `WITH` query can contain a
+data-modifying CTE (`WITH deleted AS (DELETE FROM foo RETURNING *) SELECT * FROM deleted`), and since
+every page re-runs the *entire* inner query from scratch (see below), paginating a `WITH` would
+silently re-execute a `DELETE`/`UPDATE`/`INSERT` CTE on every scroll-triggered fetch — each
+`PageDown` past the first page turning into a repeated destructive side effect. Excluded statements
+(multi-statement scripts, DML/DDL, `WITH`, `EXPLAIN`/`SHOW`/`TABLE`) simply keep the pre-existing
+full-buffer path, now width-safe. Each page is fetched via `page_query()`:
+`SELECT * FROM (<base>) AS pgpilot_page LIMIT 200 OFFSET <n>` — works uniformly for any bare `SELECT`
+without parsing/rewriting its insides, and composes correctly with whatever `ORDER BY`/`LIMIT` `base`
+already has (evaluated inside the subquery before this one slices it). `PLAYGROUND_PAGE_SIZE = 200`
+(matches DBeaver's own default fetch size); `has_more` after any fetch is `fetched_row_count ==
+PLAYGROUND_PAGE_SIZE` — fetch-*N*, not *N+1*-and-trim, since the only cost of the simpler approach is
+one extra, cheap, 0-row round trip in the rare case a table's size is an exact multiple of the page
+size. Known, disclosed ceilings: each page re-runs `base` from scratch (no cross-page caching, so
+deep pagination on an expensive query gets progressively wasteful) and isn't snapshot-consistent
+under concurrent writes between pages (no held cursor) — both fine for an ad-hoc console, not a live
+consistent grid.
+
+State lives almost entirely in `playground_task`'s own loop, not `App`: `paginated: Option<(String,
+i64)>` (base query text, next offset) is local to the task, reset on every fresh `Run` and on
+`SwitchDb` (a new `PlaygroundControl::FetchMore` unit variant requests the next page; if `paginated`
+is `None` when one arrives — shouldn't happen in normal operation, but handled defensively — the task
+still sends a `PlaygroundMore` error event rather than silently no-op'ing, so the UI's in-flight flag
+doesn't get stuck forever). `App` only gained the UI-facing subset: `playground_has_more`,
+`playground_fetching_more`, and `playground_max_scroll` (the last one is `widgets::draw_scrollable`'s
+now-`u16`-returning max-scroll bound, stashed each frame — same "render-time geometry stashed into
+`App` for the next input event" pattern `detail_pane_rect` already established in v10). The trigger
+is deliberately *not* a new keybinding: `main.rs::handle_playground_key`'s existing output-pane
+`PageDown` arm, after incrementing `detail_scroll`, checks whether the scroll is now at/past
+`playground_max_scroll` with `has_more` set and nothing already in flight, and if so fires
+`FetchMore` — the TUI analog of a GUI's "scrolled to the bottom" infinite-scroll trigger, reusing the
+same key the user already presses to scroll. `AppEvent::PlaygroundResult` (existing) became a struct
+variant carrying `has_more` alongside its `Result`; the new `AppEvent::PlaygroundMore` always carries
+a `Result` too (not a separate error path) specifically so `apply_event` can unconditionally clear
+`playground_fetching_more` from one match arm regardless of outcome. A successful `PlaygroundMore`
+appends its rows into the single `StatementResult::Rows` already sitting in `app.playground_result`
+via a let-chain that degrades to a safe no-op if the shape doesn't match — covers a straggling
+response racing a fresh `Run` (or a `DbSwitched` reset) that already replaced `playground_result`
+first; disclosed, not fixed further, since the two events come from different producer tasks on the
+same channel with no ordering guarantee between them, and the worst case is one stale frame before
+the reset overwrites it.
+
+**v12**: two Playground additions, both direct user requests — cancelling a running query, and
+CLI/nvim-flavored editor shortcuts. Query cancellation reuses the *existing* `PollControl::Cancel`
+mechanism end-to-end rather than inventing a second cancellation path: `db::playground::backend_pid()`
+runs `SELECT pg_backend_pid()` right after the Playground connection is made (and again after every
+successful `SwitchDb` reconnect), broadcasting it as a new one-shot `AppEvent::PlaygroundPid(i32)` ->
+`App::playground_pid`. Ctrl+C (`main.rs::playground_cancel`, gated on `app.playground_running`) sends
+`PollControl::Cancel(pid)` down the *existing* `control_tx` channel to `db::poll_task` — the same
+channel/handler the Activity tab's `x` key already uses — which runs `pg_cancel_backend($1)` on
+*its own* client. This works specifically because `poll_task`'s client is idle for the duration of a
+slow Playground query (that's the entire reason the two connections are separate — see the v11 note
+below) so it's always free to fire the cancel immediately, and because both connections are opened
+with the same credentials a role can always cancel its own backend without the `pg_signal_backend`
+role `x`/`X` need for an arbitrary *other* session's backend. No changes to `playground_task`'s own
+control loop or a new `PlaygroundControl` variant were needed — cancellation never goes through the
+channel that's actually busy awaiting the long query, so there's no "the consumer is blocked in
+`.await`, how does it also see a new message" problem to solve. Editor shortcuts
+(`src/editor.rs::SqlEditor::{move_word_left, move_word_right, move_to_buffer_start,
+move_to_buffer_end, delete_word_backward, delete_to_line_start, delete_to_line_end}`, wired in
+`main.rs::handle_playground_key` as Ctrl+Left/Right, Ctrl+Home/End, Ctrl+W/U/K) are readline/
+nvim-insert-mode word and line editing, **not** full vim modal editing (normal/insert/visual modes)
+— the user asked for "nvim-like" shortcuts "handy for developers," and this is the non-modal subset
+of that: chords, not a mode switch. Deliberately keeps `editor.rs`'s existing non-modal design intact
+(see that file's own module doc, and the v11 note's `tui-textarea`/`edtui` rejection below) rather
+than reopening it — going modal would mean hijacking `h`/`j`/`k`/`l`/`d`/`y`/`g` etc. as
+normal-mode commands, which can't coexist with typing those same letters into SQL text without an
+explicit mode toggle (`Esc`/`i`), a materially bigger redesign nothing here asked for. Word
+boundaries use the simpler readline definition (a run of alnum/underscore; whitespace/punctuation are
+all one separator class) rather than vim normal-mode's "punctuation is its own word" rule — good
+enough for SQL identifiers, and it's what `Ctrl+W` already means in every shell. `gg`/`G` (jump to
+buffer start/end) become `Ctrl+Home`/`Ctrl+End` since the letters `g`/`G` must stay typable.
+
+**v11**: Playground — a 6th tab, and the app's first write-capable feature. Everything before this
+was 100% read-only monitoring against fixed `pg_stat_*` queries; Playground is a SQL console (type,
+run, and see detailed results/errors for arbitrary ad-hoc SQL against the live connection), prompted
+by a direct user request with DBeaver named as the UX reference. Landed conservative in several
+specific places precisely because it's the first feature that can *change* the database, while
+reusing as much existing infrastructure as possible rather than inventing new mechanisms.
+
+Multi-line SQL input is a hand-rolled buffer (`src/editor.rs::SqlEditor` — `lines: Vec<String>`,
+char-index `cursor_row`/`cursor_col`, `insert_char`/`backspace`/`newline`/`move_left/right/up/down`/
+`home`/`end`), not a dependency. `tui-textarea` (the standard ratatui multi-line editor crate) is
+stuck on ratatui 0.29 — a real version conflict against this repo's ratatui 0.30.2 pin, not a style
+preference. `edtui` does support 0.30, but it's Vim-modal (normal/insert/visual modes), a paradigm
+nothing else in this app uses, and pulls in syntax-highlighting/line-number machinery disproportionate
+to "type a SQL query" — both were rejected in favor of the small hand-rolled buffer, with
+`Frame::set_cursor_position` (ratatui-core, confirmed against the vendored source) putting the real
+terminal cursor inside it.
+
+Execution runs on its **own dedicated `Client`/background task** (`db::playground::playground_task`,
+`main.rs`'s `playground_tx`/`PlaygroundControl::{Run, SwitchDb}`), connected eagerly at startup right
+next to `db::poll_task`'s own connect-and-spawn (before `conninfo`/`tls`/`conn_parts` are moved into
+`poll_task`'s spawn call — `tls`/`conn_parts` are `Clone`, `conninfo` is only borrowed there). Reusing
+`poll_task`'s one `Client` for a user's ad-hoc query would freeze every live panel for as long as that
+query runs, defeating the app's entire premise — proven live with `SELECT pg_sleep(30)` from
+Playground while confirming Overview's "updated Xs ago" kept advancing the whole time. If this second
+connect fails, `App::playground_conn_error` shows a permanent in-tab error block for the session (no
+retry — ponytail: restart to retry) rather than crashing. The task follows the `d`-popup database
+switch (`main.rs::apply_event`'s `DbSwitched` arm now also forwards `PlaygroundControl::SwitchDb` to
+it) so a query typed while looking at db "foo" can't silently execute against a stale "bar"
+connection; if the playground connection's *own* reconnect fails independently of the main one's
+(rare — same host/user/creds, and the main one just succeeded), it keeps running against the previous
+database until the next successful switch or restart, surfaced once as a `PlaygroundResult(Err(..))`
+rather than silently swallowed.
+
+Execution itself goes through `Client::simple_query()`, not `Client::query()` — everything comes back
+text-encoded (`SimpleQueryMessage::{RowDescription, Row, CommandComplete}`, confirmed
+`#[non_exhaustive]` against the vendored `tokio-postgres` source), which avoids a per-Postgres-type
+`FromSql` dispatch table to stringify arbitrary result columns, and natively runs `;`-separated
+multi-statement scripts in one call. `db/playground.rs::group()` turns the flat message stream into
+`Vec<StatementResult>` (`Rows{columns, rows}` or `Command{rows_affected}` — no command-tag text like
+psql's "UPDATE 3", `simple_query` only gives a row count); split from the trivial, untested
+`to_owned()` boundary specifically because `SimpleQueryRow`/`SimpleColumn` are `pub(crate)` to
+tokio-postgres and can't be constructed in a test, so the actually-branchy logic sits in a pure,
+fully-tested function instead. Errors reuse `db/mod.rs`'s `chained_message()` (promoted from private
+to `pub(crate)` — same helper `run_signal`'s cancel/terminate path already used) for the real
+server ERROR/DETAIL/HINT text, not a generic wrapper. Because it's raw SQL text, a user can type
+`BEGIN; ...; ROLLBACK;` themselves for a dry run — needs no special handling.
+
+Non-`SELECT` statements need an explicit confirm: `db/playground.rs::needs_confirmation()` splits on
+top-level `;` (ponytail: naive, doesn't understand semicolons inside string/dollar-quoted literals)
+and classifies each chunk read-only by a `SELECT`/`WITH`/`EXPLAIN`/`SHOW`/`TABLE` prefix check. The
+execute key doubles as its own confirm — first press on an unsafe script sets
+`App::playground_confirm_pending` and shows an inline warning instead of running; second press
+executes; `Esc` clears it without leaving the tab; any buffer-mutating key also clears it (a stale
+confirmation must not silently survive an edit to the text it was confirming) — no separate y/n key.
+
+Key routing was the trickiest part: **the editor captures every plain key while the Playground tab is
+active**, since typing SQL must not trigger the app's existing single-letter shortcuts (`1`-`5` tab
+switch, `s` sort, `r` refresh, `space` pause, `q` quit, `d`/`e`/`g` popups). `main.rs::handle_key`
+gained a fifth exclusive early-return branch (after the four existing ones —
+`error_detail_open`/`diagnosis_open`/`detail_popup_open`/`db_popup.is_some()`, see the v10 note below)
+keyed on `app.active == PanelKind::Playground`, routing to a new `handle_playground_key`. Reserved,
+non-printable/modified keys carved out of the capture: **F5** (primary execute — chosen because
+function keys have unambiguous escape sequences on every terminal, unlike modifier+Enter combos;
+see below), **Ctrl+Enter**/**Cmd+Enter** (secondary execute aliases — `modifiers.intersects(CONTROL |
+SUPER)` on `KeyCode::Enter`), **Ctrl+H** (toggle a full-screen history overlay), **Ctrl+Q**
+(quit — plain `q` must stay typeable, e.g. `...FROM queue`), **Esc** (leave the tab back to Overview —
+one-directional; closes the confirm-pending state or the history overlay first if either is open),
+**PageUp/PageDown** (scroll the output pane, reusing the existing global binding as-is). Plain `Enter`
+inserts a newline rather than executing. This required threading `KeyModifiers` into `handle_key`
+(previously only `KeyCode` was passed, though `key.modifiers` was already available at the call site)
+and a new `playground_tx: mpsc::Sender<PlaygroundControl>` parameter alongside the existing
+`control_tx`, mirrored into `apply_event` too for the `DbSwitched`-forwarding above.
+
+**Ctrl+Enter/Cmd+Enter fix**: originally shipped as dead code — a plain (non-enhanced) terminal
+sends the identical `\r` byte for Enter and Ctrl+Enter, so crossterm always decoded both to
+`KeyModifiers::NONE` and the `CONTROL`-guarded match arm could never fire; Cmd+Enter had no code
+path at all. Fixed by having `main.rs::main()` negotiate crossterm's Kitty keyboard-enhancement
+protocol right after `ratatui::init()`/`EnableMouseCapture`:
+`crossterm::terminal::supports_keyboard_enhancement()` (a live query against the actual terminal,
+not a hardcoded allowlist) gates a `PushKeyboardEnhancementFlags(DISAMBIGUATE_ESCAPE_CODES)`,
+popped symmetrically right before `DisableMouseCapture`/`ratatui::restore()` — same
+not-wired-into-the-panic-hook ceiling `EnableMouseCapture` already carries. On a terminal that
+supports the protocol (kitty, WezTerm, foot, alacritty, Ghostty, newer iTerm2), this makes
+Ctrl+Enter (and Cmd+Enter, which such terminals forward as `KeyModifiers::SUPER`) actually
+distinguishable from plain Enter for the first time. Disclosed ceiling: `supports_keyboard_enhancement()`
+returns `Ok(false)` on Terminal.app, plain xterm, and unconditionally on Windows — those still
+silently fall back to inserting a newline, exactly like before this fix — which is why F5 stays
+documented as the one execute key guaranteed to work everywhere.
+
+Results and errors render through the **existing** `ui/widgets.rs::draw_scrollable` — the same
+PageUp/PageDown-scrollable, `[a-b/N]`-indicator widget Queries/Triggers/Activity's detail panes
+already use (see the v9 note below) — rather than a `ratatui::widgets::Table` with row selection,
+deliberately: row selection would need `j`/`k` or arrow keys, both unavailable since the editor owns
+them. `ui/playground.rs::build_result_lines` formats each `StatementResult` as one lightweight
+ASCII-table block (computed max-column-width padding, `NULL` for `None` cells, a trailing row count;
+a `── Statement N ──` separator only appears once there's more than one, keeping the common
+single-`SELECT` case clean) — no real column-resize/horizontal-scroll for very wide result sets, a
+disclosed ceiling. Errors render through the same pane (red), replacing the previous result — **not**
+inserted into the sticky `App::errors` map, which is reserved for a *polled panel* being persistently
+broken across ticks, a different concept from a one-shot user-submitted query's error. A new
+`AppEvent::PlaygroundResult(Result<Vec<StatementResult>, String>)` carries the outcome back — no new
+`PanelSnapshot` variant, since Playground execution isn't part of any poll tier.
+
+History (`App::playground_history: VecDeque<String>`, capped at `main.rs::PLAYGROUND_HISTORY_CAP =
+50`) and the draft SQL itself are **in-memory/session-scoped only** — discarded on quit, same as
+almost every other piece of `App` state. `config.toml` (`src/config.rs`) is deliberately **unchanged**
+by this feature — worth stating explicitly since Playground is the app's first write-capable feature
+and a future reader might otherwise assume persistence was added somewhere for it. `on_db_switched()`
+clears `playground_result`/`playground_confirm_pending`/`playground_running` (stale execution state)
+but leaves the draft text and history alone (still meaningful across a db switch in the same session).
+
+`PanelKind::ALL` is now `[PanelKind; 6]`; `App::active_row_count()`/`scroll_down()`/`scroll_up()`/
+`cycle_sort()` needed zero changes (all already end in a catch-all `_ =>` arm, so Playground
+implicitly no-ops — there's no row-selectable table, and `j`/`k` never reach these methods since the
+editor swallows them as literal characters first). The only *exhaustive* `match app.active` in the
+codebase — `ui/mod.rs::draw()`'s tab dispatch — gained the new arm.
+
+**v10**: mouse support — clicking the detail pane on Queries/Activity/Triggers now zooms it into a
+full-screen popup (`esc`/`q` closes it, `PageUp`/`PageDown` keep scrolling the same content while
+it's open). This is the first mouse interaction anywhere in the app; `ratatui::init()` doesn't
+enable mouse reporting on its own, so `main.rs` now brackets the run loop with an explicit
+`crossterm::execute!(stdout(), EnableMouseCapture)` right after `ratatui::init()` and
+`DisableMouseCapture` right before `ratatui::restore()` — deliberately *not* wired into ratatui's
+own panic-hook restore (a crash can leave the terminal in mouse-report mode until the next
+`reset`/new shell; a known, low-severity ceiling, not worth a custom panic hook for). Hit-testing
+needs to know each frame's actual on-screen detail-pane `Rect`, which only exists inside that tab's
+own `draw()` (post-layout-split) — rather than re-deriving the layout in the input handler, `App`
+gained `detail_pane_rect: Option<Rect>`, written by `queries::draw`/`activity::draw`/`triggers::draw`
+right after they compute their layout split (and explicitly set back to `None` on every one of their
+own early-return branches — loading/empty/not-available — so a click during those states can't match
+a stale rect left over from the last successful frame). `main.rs::handle_mouse` checks
+`MouseEventKind::Down(MouseButton::Left)` against that rect via `ratatui::layout::Rect::contains`,
+gated the same way the three keyboard-only overlays already gate each other (ignored if
+`error_detail_open`/`diagnosis_open`/`db_popup`/`detail_popup_open` — a new field, the popup's own
+open flag — is already set), so clicking never fights with an overlay that's already capturing input.
+The popup itself needed zero new rendering code: each tab already has a `draw_detail(frame, area,
+app)` that takes an arbitrary `Rect` (built for the small inline pane, but nothing about it assumes
+that), so `draw_detail_popup` is just `Clear` the full `frame.area()` then call the *same*
+`draw_detail` again with that full-screen `Rect` instead — same content, same
+`widgets::draw_scrollable` clamping/scrolling, no duplicated line-building logic. `ui/mod.rs::draw()`
+dispatches to whichever tab's popup fn matches `app.active`, layered after the diagnosis modal, same
+"popups stack on top in a fixed order" precedent as the other three. Row selection stayed
+keyboard-only (`j`/`k`) — deliberately scoped to just the detail pane, since that was the specific
+ask; clicking a table row does nothing. One real, disclosed tradeoff: enabling mouse capture is what
+most terminals use to gate native click-drag text selection, so copying SQL text out of pgpilot via
+the terminal's own selection may need a modifier-held drag (e.g. macOS Terminal/iTerm's Option-drag)
+depending on the terminal — not solved here (would need a runtime toggle to suspend capture, not
+requested).
+
+**v9**: the three always-visible "detail panes" — Queries' "Selected Statement", Triggers'
+"Selected Trigger", Activity's "Selected Backend" — are now scrollable (`PageUp`/`PageDown`)
+instead of silently clipping long content, prompted by a direct user report of SQL text being "only
+half shown" at the bottom of the screen. Root cause was two-layered: `ui/queries.rs::draw_detail`
+never called `.wrap()` at all (the other two panes did), so a long single-line query was cut off
+*horizontally* mid-character with no indication more text existed — the literal bug being reported —
+and all three panes (including the two that did wrap) still had no vertical scroll, so a
+multi-line function body or a tall stats block was clipped by the pane's fixed height regardless
+(the ceiling the v7 note above originally described as permanent). Fixed with one shared
+`ui/widgets.rs::draw_scrollable(frame, area, title, lines, scroll)` that all three `draw_detail` fns
+call instead of hand-building their own `Paragraph`+`block` — wraps (`Wrap { trim: false }`, fixing
+queries.rs's gap), clamps `scroll` to what the pane can actually show, and appends a `[a-b/N]`
+position indicator to the block title only once content overflows (so overflow is visible, not
+silently truncated with no affordance) — same "make broken/incomplete state visible" instinct as
+`error_block`'s red-bordered "✗" treatment, applied to a different failure mode. Clamping needs a
+wrapped-row count; `Paragraph::line_count()` would give an exact one but turned out to be gated
+behind ratatui's `unstable-rendered-line-info` cargo feature (semver-exempt — not worth enabling for
+a scroll clamp), so `widgets::wrapped_row_count()` hand-rolls a greedy width/column-division estimate
+off the stable, public `Line::width()` instead — a slight undercount vs. true word-wrap on a line
+that breaks early at a word boundary, immaterial here since it only feeds a clamp and an indicator,
+not exact layout. `App` gained one new field, `detail_scroll: u16` (shared across all three tabs,
+not per-tab, since only one detail pane is ever visible at once) — reset to 0 in `scroll_down()`/
+`scroll_up()` (moving the row cursor changes the pane's content, so a stale offset shouldn't carry
+over), in the new `App::set_active()` (replacing `main.rs`'s 5 direct `app.active = PanelKind::X`
+assignments, so a future 6th tab can't forget the reset), and in `on_db_switched()` alongside the
+other per-database state it already clears. `j`/`k` themselves are untouched — they still move the
+table's row cursor exactly as before; `PageUp`/`PageDown` is new ground alongside them, not a
+replacement, since the codebase had no prior "sub-focus within a tab" key-dispatch concept to
+extend. Footer help text and the README keybindings table both gained a line for the new keys.
 
 **v8**: fixed two related "cumulative/point-sampled data misread as current state" bugs, both
 surfaced by the same user in one live session comparing pgpilot against real RDS CloudWatch/Console
@@ -94,9 +601,10 @@ exactly (`[Min(8), Percentage(35)]`, `theme::block("Selected Trigger")` bordered
 content the popup used to show, just always on screen for whichever row is highlighted).
 `ui/activity.rs` gained a fifth layout row (`Length(6)`, "Selected Backend" — pid/user/state/
 duration/wait + full query text) between the table and the blocking tree, shrinking the table from
-`Min(8)` to `Min(6)` and the blocking tree from `Percentage(30)` to `Min(5)` to make room. Neither
-new pane scrolls long content (it just gets clipped by the pane's height) — the same ceiling
-`ui/queries.rs`'s own detail pane already had for a long query, not a new limitation. Both detail
+`Min(8)` to `Min(6)` and the blocking tree from `Percentage(30)` to `Min(5)` to make room. At the
+time neither new pane scrolled long content (it just got clipped by the pane's height) — the same
+ceiling `ui/queries.rs`'s own detail pane had for a long query. v9 later fixed this across all three
+panes — see the v9 Architecture note. Both detail
 panes default to row 0 (`.selected().unwrap_or(0)`, not the stricter `App::selected_trigger()`/
 `selected_activity_row()` helpers, which returned `None` — rendering nothing at all — until the
 user pressed `j` once) so the pane is never blank on first load, matching `ui/queries.rs`'s own
@@ -193,8 +701,33 @@ See `README.md` for user-facing usage/keybindings/tab reference.
 
 ## Scope
 
-v8 (current): everything below plus two fixes for cumulative/point-sampled data that was being misread as current state — the wait-events chart's active-only normalization and the v6 temp-spill suspect's raw-cumulative threshold, both now rate/window-based — see the v8 Architecture note. v7 added a consistent "always-visible inline detail pane, updates with the row cursor" UX for Triggers and Activity, matching Queries — see the v7 Architecture note. v6 added 6 new diagnosis suspects (xid wraparound, connection pressure, checkpoint storm, disk spill/work_mem, replication lag, lock wait chain) and an alert-only N+1 query detector — see the v6 Architecture note and `docs/postgres-incident-research.md` for the real-incident research behind each. v5 added per-query disk I/O (bytes, disk time, temp-file spill) on the Queries tab, sortable by I/O. Five tabs (Overview, Queries, Activity, Tables & Indexes, Triggers — `CacheIo` was folded into Overview in v4), the monochrome UI, tiered polling, pause/rate control, the full-screen database picker, cancel/terminate, the Triggers tab's function-source popup, and the `g`-triggered diagnosis modal (replacing v2's always-visible diagnosis strip/alerts list) — all described above. Saved connection profiles (list/add/edit/pick, SSL/mutual-TLS support, no stored password) remain from v1.
+v16 (current): mouse support extended beyond v10's original click-to-zoom — mouse-wheel scroll on all
+4 scrollable panes (the 3 detail panes plus Playground's transcript), clicking a table row to select
+it (Queries/Activity/Triggers/Tables & Indexes), and clicking a tab to switch — see the v16
+Architecture note. v15: Playground's transcript and live input now render inside one shared bordered
+block instead of two separately-bordered boxes (no seam between output and input, matching real psql), and
+gained Tab-triggered autocomplete for SQL keywords/schema/table names (bash/readline-style inline
+cycling, not a dropdown); a continuation line's prompt also dropped its repeated database name (`-> `
+instead of `dbname-> `, a deliberate divergence from real psql, fixing a follow-up user report where
+the repeated prefix made a buffered continuation line look like a second fresh prompt) — see the v15
+Architecture note. v14: Playground rewritten from a split
+"SQL"/"Output" box pair (F5-to-run) into a
+psql-style REPL — a scrolling transcript of every command this session, `dbname=>`/`dbname->`
+prompts, Enter runs once a statement is `;`-terminated, Up/Down recalls history inline, Ctrl+C is
+psql's own dual-purpose cancel-or-clear-buffer, and result tables match real psql's `|`-separated/
+right-aligned-numerics format byte-for-byte — see the v14 Architecture note. v13: fixed a crash
+("Formatting argument out of range") triggered by any Playground result containing a >64KB cell, and
+added stateless LIMIT/OFFSET-based pagination ("scroll for more") for single bare-`SELECT` queries,
+plus a panic hook that now also cleans up mouse-capture/Kitty-keyboard terminal state on any crash —
+see the v13 Architecture note. v12: Playground gained query cancellation (Ctrl+C, reusing the existing Activity-tab
+cancel plumbing against the Playground connection's own backend pid) and a set of readline/
+nvim-insert-mode editor chords (word/line delete, word/buffer-jump) — deliberately not full vim
+modal editing, which stays out of scope — see the v12 Architecture note. v11 added Playground, a
+6th tab and the app's first write-capable feature — a SQL console with its own dedicated connection
+(so a slow/ad-hoc query can never freeze live monitoring), a hand-rolled multi-line editor, a
+confirm guard on non-`SELECT` statements, and in-memory-only history/drafts — see the v11
+Architecture note. v10 added the app's first mouse interaction — clicking a detail pane (Queries/Activity/Triggers) zooms it into a full-screen popup — see the v10 Architecture note. v9 added scrollable detail panes (`PageUp`/`PageDown`) on Queries/Triggers/Activity, replacing the clipped-content ceiling those panes had since v7 — see the v9 Architecture note. v8 fixed two related "cumulative/point-sampled data misread as current state" bugs — the wait-events chart's active-only normalization and the v6 temp-spill suspect's raw-cumulative threshold, both now rate/window-based — see the v8 Architecture note. v7 added a consistent "always-visible inline detail pane, updates with the row cursor" UX for Triggers and Activity, matching Queries — see the v7 Architecture note. v6 added 6 new diagnosis suspects (xid wraparound, connection pressure, checkpoint storm, disk spill/work_mem, replication lag, lock wait chain) and an alert-only N+1 query detector — see the v6 Architecture note and `docs/postgres-incident-research.md` for the real-incident research behind each. v5 added per-query disk I/O (bytes, disk time, temp-file spill) on the Queries tab, sortable by I/O. Five tabs (Overview, Queries, Activity, Tables & Indexes, Triggers — `CacheIo` was folded into Overview in v4), the monochrome UI, tiered polling, pause/rate control, the full-screen database picker, cancel/terminate, the Triggers tab's function-source popup, and the `g`-triggered diagnosis modal (replacing v2's always-visible diagnosis strip/alerts list) — all described above. Saved connection profiles (list/add/edit/pick, SSL/mutual-TLS support, no stored password) remain from v1.
 
-Deliberately out of scope: deleting a saved profile in place, true time-integrated wait-event profiling (current sampling is a bounded recent-window point-sample, not `pg_wait_sampling`-grade — see `App::wait_event_samples` above), and query-plan-derived index suggestions (missing-index candidates are limited to two mechanically-derivable heuristics, not fabricated column-level DDL guesses — see `ui/tables_indexes.rs` above). See README for the full deferred list.
+Deliberately out of scope: deleting a saved profile in place, true time-integrated wait-event profiling (current sampling is a bounded recent-window point-sample, not `pg_wait_sampling`-grade — see `App::wait_event_samples` above), query-plan-derived index suggestions (missing-index candidates are limited to two mechanically-derivable heuristics, not fabricated column-level DDL guesses — see `ui/tables_indexes.rs` above), and — for Playground — persisted history/drafts to disk, real SQL tokenization for the confirm-guard's statement split and the Enter-completeness check (see the v11/v14 Architecture notes), and full vim modal editing (normal/insert/visual modes — v12 added non-modal readline/nvim-insert-mode chords instead, see the v12 Architecture note). Query cancellation from Playground shipped in v12. Pagination for `WITH`/multi-statement/DML results and cursor-held (vs. stateless LIMIT/OFFSET) pagination are deliberately out of scope — see the v13 Architecture note. Also out of scope, both from v14: the literal Postgres command tag on a non-`SELECT` result (`CREATE TABLE`/`UPDATE 3` — `simple_query`'s driver-level API only exposes a row count, see the v14 note) and matching psql's blank-for-`NULL` default (kept as literal `NULL` text, a deliberate readability choice, not an oversight). Also out of scope, from v15: column-name-level autocomplete (no existing data source beyond the narrow FK-column list) and a DBeaver-style dropdown completion popup (Tab instead does bash/readline-style inline cycling, a direct user choice) — see the v15 Architecture note. Also out of scope, from v16: mouse-wheel scroll moving table row selection (only `j`/`k` and click-to-select do that — not a general "wheel = arrow keys" mapping) and a pixel-exact tab-bar click hit test (an equal-width approximation is used instead, since `ratatui::widgets::Tabs` exposes no per-segment layout API) — see the v16 Architecture note. See README for the full deferred list.
 
 **Keep this file in sync as features land** — update the Architecture section whenever the codebase changes in a way future instances would need to know about.

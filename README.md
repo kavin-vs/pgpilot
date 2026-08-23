@@ -52,7 +52,7 @@ checkpoint storms, lock chains, disk spill, replication lag — and surfaces a r
 
 ## 2. Installation
 
-PgPilot has two real install paths today — a quick install for macOS/Linux, and a
+PgPilot has a quick install for macOS/Linux, a Chocolatey package for Windows, and a
 manual download or build for everything else. No crates.io publish and no Homebrew tap
 yet (deliberately deferred, see [Scope](#11-scope)) — this section only lists what
 actually works, nothing aspirational.
@@ -75,12 +75,19 @@ directory is on your `PATH`.
 <summary><strong>Windows</strong></summary>
 <br>
 
-Download the `.zip` for your platform from the
+Via [Chocolatey](https://chocolatey.org):
+
+```powershell
+choco install pgpilot
+```
+
+(Until the package clears Chocolatey's moderation review, install the `.nupkg` attached
+to a [release](https://github.com/kavin-vs/pgpilot/releases) directly:
+`choco install pgpilot -s <folder containing the .nupkg>`.)
+
+Or download the `.zip` for your platform from the
 [Releases page](https://github.com/kavin-vs/pgpilot/releases) and unzip `pgpilot.exe`
 somewhere on your `PATH`.
-
-No PowerShell one-liner yet — curl-pipe-to-shell isn't idiomatic on Windows, so this is
-a manual download for now.
 </details>
 
 ### 2.2 From Source
@@ -114,6 +121,12 @@ If installed via `install.sh`:
 
 ```bash
 rm "${PGPILOT_INSTALL_DIR:-$HOME/.local/bin}/pgpilot"
+```
+
+If installed via Chocolatey:
+
+```powershell
+choco uninstall pgpilot
 ```
 
 If installed via `cargo install --path .`:
@@ -384,7 +397,7 @@ running, depending on your terminal.
 |---|---|---|
 | macOS (Intel + Apple Silicon) | `install.sh` or `cargo build --release` | |
 | Linux (x86_64) | `install.sh` or `cargo build --release` | |
-| Windows (x86_64) | `.zip` from [Releases](https://github.com/kavin-vs/pgpilot/releases) or `cargo build --release` | curl-pipe-to-shell isn't idiomatic on Windows, so no install script there |
+| Windows (x86_64) | `choco install pgpilot`, `.zip` from [Releases](https://github.com/kavin-vs/pgpilot/releases), or `cargo build --release` | Chocolatey package pending its first moderation review; the `.nupkg`/`.zip` release assets work meanwhile |
 
 Tested against Postgres **13 through 17**.
 

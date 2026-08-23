@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>pgpilot</id>
+    <!-- overwritten at pack time: choco pack --version X.Y.Z -->
+    <version>0.1.0</version>
+    <title>PgPilot</title>
+    <authors>Kavin V S</authors>
+    <projectUrl>https://github.com/kavin-vs/pgpilot</projectUrl>
+    <projectSourceUrl>https://github.com/kavin-vs/pgpilot</projectSourceUrl>
+    <bugTrackerUrl>https://github.com/kavin-vs/pgpilot/issues</bugTrackerUrl>
+    <license type="expression">MIT</license>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <summary>A lightweight, htop/k9s-style interactive TUI for live Postgres monitoring</summary>
+    <description>PgPilot is a lightweight, interactive Rust CLI that gives a live, at-a-glance view of Postgres usage/utilization -- connections, cache hit ratio, index health, and schema/table sizes -- in the spirit of htop/k9s, but for Postgres. Connects directly via a native Rust driver, no psql binary required.</description>
+    <tags>postgres postgresql cli tui monitor dashboard database dba</tags>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

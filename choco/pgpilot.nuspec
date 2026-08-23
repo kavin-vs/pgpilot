@@ -9,7 +9,7 @@
     <projectUrl>https://github.com/kavin-vs/pgpilot</projectUrl>
     <projectSourceUrl>https://github.com/kavin-vs/pgpilot</projectSourceUrl>
     <bugTrackerUrl>https://github.com/kavin-vs/pgpilot/issues</bugTrackerUrl>
-    <license type="expression">MIT</license>
+    <license type="expression">Apache-2.0</license>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <summary>A lightweight, htop/k9s-style interactive TUI for live Postgres monitoring</summary>
     <description>PgPilot is a lightweight, interactive Rust CLI that gives a live, at-a-glance view of Postgres usage/utilization -- connections, cache hit ratio, index health, and schema/table sizes -- in the spirit of htop/k9s, but for Postgres. Connects directly via a native Rust driver, no psql binary required.</description>

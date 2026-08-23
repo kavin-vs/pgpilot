@@ -8,7 +8,7 @@ A live, at-a-glance terminal dashboard for Postgres — connections, cache hit r
 blocking sessions, index health, and a ranked diagnosis of what's actually wrong — from
 one binary that talks directly to the database over a native Rust driver.
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-blue?style=flat-square)](#9-platform-support)
 [![Postgres](https://img.shields.io/badge/postgres-13%20--%2017-blue?style=flat-square)](#9-platform-support)
 

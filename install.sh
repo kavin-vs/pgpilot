@@ -25,8 +25,13 @@ case "$os" in
     ;;
 esac
 
-latest=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
-if [ -z "$latest" ]; then
+# Resolve via the plain releases/latest redirect, not api.github.com --
+# the API is rate-limited to 60 unauthenticated requests/hour per IP,
+# which a shared NAT/CI runner can exhaust in normal use; this redirect
+# is served by github.com itself and isn't subject to that limit.
+latest=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")
+latest=${latest##*/}
+if [ -z "$latest" ] || [ "$latest" = "latest" ]; then
   echo "could not determine latest release — see https://github.com/$REPO/releases" >&2
   exit 1
 fi

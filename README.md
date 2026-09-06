@@ -12,6 +12,8 @@ one binary that talks directly to the database over a native Rust driver.
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-blue?style=flat-square)](#9-platform-support)
 [![Postgres](https://img.shields.io/badge/postgres-13%20--%2017-blue?style=flat-square)](#9-platform-support)
 
+![PgPilot walkthrough: database picker, Overview, diagnosis modal, Activity, Tables & Indexes, Triggers, and a Playground query](docs/screenshots/walkthrough.gif)
+
 </div>
 
 ---

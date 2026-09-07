@@ -29,7 +29,9 @@ esac
 # the API is rate-limited to 60 unauthenticated requests/hour per IP,
 # which a shared NAT/CI runner can exhaust in normal use; this redirect
 # is served by github.com itself and isn't subject to that limit.
-latest=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")
+echo "Resolving latest release for $REPO..."
+latest=$(curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 --retry-delay 1 \
+  -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")
 latest=${latest##*/}
 if [ -z "$latest" ] || [ "$latest" = "latest" ]; then
   echo "could not determine latest release — see https://github.com/$REPO/releases" >&2
@@ -40,7 +42,8 @@ url="https://github.com/$REPO/releases/download/$latest/$BIN_NAME-$latest-$targe
 echo "Installing $BIN_NAME $latest for $target..."
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
-curl -fsSL "$url" -o "$tmpdir/$BIN_NAME.tar.gz"
+curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 --retry-delay 1 \
+  "$url" -o "$tmpdir/$BIN_NAME.tar.gz"
 tar -xzf "$tmpdir/$BIN_NAME.tar.gz" -C "$tmpdir"
 mkdir -p "$INSTALL_DIR"
 mv "$tmpdir/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"

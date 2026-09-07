@@ -236,6 +236,12 @@ the connection was resolved. Adjustable at runtime with `-`/`+` — see [Keys](#
 blocking-tree's connectors) for plain ASCII, for terminals/fonts that don't render them
 cleanly.
 
+`--no-update-check` disables the background check for a newer release. By default, pgpilot
+checks GitHub for a newer release at most once every 24h, and — if one exists — downloads
+and verifies it in the background without touching the running binary; a footer message
+("Update vX.Y.Z ready — restart to apply") appears once it's staged, and it's swapped in
+automatically the next time you launch pgpilot.
+
 ### 4.5 Examples
 
 ```bash
@@ -280,6 +286,8 @@ Options:
           Refresh interval in seconds [default: 2]
       --ascii
           Use plain ASCII glyphs instead of Unicode block/braille characters, for terminals/fonts that don't render them cleanly
+      --no-update-check
+          Skip the background check for a newer release on GitHub
   -h, --help
           Print help
 ```

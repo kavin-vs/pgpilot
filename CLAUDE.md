@@ -45,6 +45,75 @@ For cases 2–3, TLS comes from the resolved `Profile`'s ssl fields, and passwor
 
 ## Architecture
 
+**v17**: background auto-update, plus an unrelated `install.sh` reliability fix, both from a
+single direct user report ("implement auto update option ... also if i run mac installer again it
+is not showing any message -- stuck in there"). **`install.sh`**: both `curl` calls (the
+`releases/latest` redirect resolve, and the tarball download) had no `--connect-timeout`/
+`--max-time`, and `-s` suppresses all curl output — a stalled connection (e.g. GitHub's edge
+throttling a second rapid request from the same IP shortly after a first run, the same *class* of
+problem `0b916fe` already fixed once for `api.github.com`'s hard rate limit) hung the script with
+zero visible output. Fixed with `--connect-timeout 10 --max-time 30|60 --retry 2 --retry-delay 1`
+on both calls, plus one new `echo` before the redirect resolve (previously the only silent-until-
+success step, since the first pre-existing `echo` is after it). No new state/lock file — the root
+cause was "no ceiling on a network call," not "no memory of a prior run."
+
+**Auto-update** (`src/update.rs`, new module, pure logic no UI references — same shape as
+`src/db/*.rs`'s standalone `async fn(...) -> Result<T>` modules): on by default, `--no-update-check`
+(`src/cli.rs`) opts out. `update::update_check_task(tx)` is spawned fire-and-forget from `main()`
+after `poll_task`'s own spawn (so it can never delay getting into the Postgres session — same
+fire-and-forget precedent `poll_task`/`playground_task` already set), throttled to at most once per
+24h via a `last_checked_unix` timestamp in a new sibling state file, `update_state.toml` (same
+`ProjectDirs::from("", "", "pgpilot").config_dir()` + `0o600`-on-unix pattern `src/config.rs`
+already established — deliberately a separate file, not added to `config.toml`/`Config`, which
+stays scoped to connection profiles only, same reasoning already documented for why Playground's
+state doesn't live there either). The throttle exists for the exact same reason as the `install.sh`
+fix above: `self_update`'s GitHub backend calls `api.github.com` directly (confirmed live — a probe
+during development hit that same unauthenticated rate limit), so an unthrottled per-launch check
+would risk the identical failure class. **Load-bearing fix caught during manual verification**: the
+timestamp must be persisted even when the check *fails* (rate-limited, offline, etc.) — an earlier
+version only saved it on success, which meant a persistent failure would retry on every single
+launch instead of backing off, i.e. exactly the rate-limit storm the throttle exists to prevent;
+`check_and_stage_blocking` now always calls `save_state` after `fetch_and_stage`, whatever its
+`Result`.
+
+On a `due_for_check` launch: `self_update::backends::github::Update::configure()...is_update_available()`
+checks for a newer release than `env!("CARGO_PKG_VERSION")`; if found, a second `Update` (same
+builder, plus `.bin_install_path(...)` and `.checksum_from_asset("checksums.txt")`) downloads and
+checksum-verifies the matching platform asset — using this repo's own release assets exactly as
+`release.yml` publishes them (`pgpilot-{tag}-{target}.tar.gz`/`.zip` + `checksums.txt`, all
+resolved automatically by `self_update`'s own target-string asset matching, no target override
+needed). Crucially, `bin_install_path` points at a **side path**
+(`<config_dir>/update_staged/pgpilot[.exe]`), never `current_exe()` — the background task never
+touches the binary a live TUI session is running from. `self_update` is fully synchronous
+(its async support is a separate, unused `"async"` feature), so the whole check+download runs
+inside `tokio::task::spawn_blocking` — no `tokio` `"net"` feature needed. On success, reuses the
+**existing** footer status mechanism as-is: `AppEvent::Status(format!("Update v{v} ready — restart
+to apply"), StatusLevel::Info)` over the same `tx` channel every other background task already
+sends on — no new `AppEvent` variant, no new `App` field, no `apply_event`/UI changes needed. On
+any failure, silent (no status message) — a background update hiccup shouldn't compete with real
+DB feedback on the one status line.
+
+The actual swap happens only at the **next process's** startup: `update::apply_staged_update_if_present()`
+is the literal first thing `main()` does (before `Cli::parse()`, before `ratatui::init()`) — if a
+staged version exists and is still genuinely newer (`self_update::version::bump_is_greater`,
+defensive against an already-applied or downgrade-edge-case marker), `self_replace::self_replace(&staged_path)`
+swaps the running executable's file in place (the `self-replace` crate exists specifically to make
+this safe cross-platform, including the Windows can't-delete-a-running-exe case) and clears the
+marker; otherwise the stale marker/file is just cleaned up. Errors here are logged to stderr (still
+safe pre-`ratatui::init()`) and swallowed — a corrupted staged update must never block startup.
+
+**Dependency choice, load-bearing**: `self_update` is configured `default-features = false` +
+`features = ["ureq", "rustls", "github", "checksums", "archive-tar", "compression-tar-gz",
+"archive-zip", "compression-zip-deflate"]` — deliberately **not** its default `reqwest` backend.
+Confirmed by reading both crates' actual `Cargo.toml`s: `reqwest`'s own `rustls` feature now
+hard-selects the `aws-lc-rs` crypto provider (no `ring` option exposed anymore), which would pull
+in `aws-lc-sys` and reintroduce the exact NASM/cmake cross-build problem `rustls`/
+`tokio-postgres-rustls` were already pinned to `ring` to avoid (see the Build requirement note
+above) — silently breaking the Windows/macOS release CI targets. `ureq`'s `rustls` feature uses
+`ring` instead, matching this repo's existing TLS backend choice exactly. Verified end-to-end after
+implementation: `cargo tree -i aws-lc-sys` and `cargo tree -i openssl-sys` both report neither crate
+in the dependency tree, and `cargo build`/`cargo clippy --all-targets -- -D warnings` are clean.
+
 **v16**: mouse-wheel scroll and click extended to the rest of the app — wheel scrolling on all 4
 scrollable panes (previously `PageUp`/`PageDown`-only), clicking a table row to select it (previously
 keyboard-only, an explicit v10 ceiling: "clicking a table row does nothing"), and clicking a tab to
@@ -696,10 +765,11 @@ shapes the existing tests already exercise.
 - `src/db/statements.rs` — `extension_loaded()` (cheap presence check, cached by `poll_task` at connect/reconnect so the medium tier can skip the real query entirely rather than just skip acting on an empty result) + `fetch(client, pg17_plus) -> Vec<StatementRow>` (assumes loaded; `poll_task` wraps the result in `StatementsData::{NotAvailable,Available}` based on the cached bool). Column names (`total_exec_time` etc.) are PG13+; earlier versions used `total_time` et al. — not handled, no minimum PG version is otherwise documented for this app. **Per-query I/O** (v5): besides `shared_blks_hit`/`shared_blks_read`, the row carries `shared_blks_written`/`temp_blks_read`/`temp_blks_written` and `io_time_ms`, with `StatementRow::io_blocks()`/`io_bytes()` (hits deliberately excluded — a hit never touched a device; ×8192 assumes the default `block_size`, marked with a `ponytail:` comment). `io_time_ms` is version-branched the same way `cache_io::fetch_bgwriter` is — PG13-16 `blk_read_time + blk_write_time`, PG17+ `shared_blk_read_time + shared_blk_write_time` (PG17 renamed them) — but built by a `fn query(pg17_plus) -> String` with `format!` rather than two consts, since the two variants would otherwise share 20 identical lines that can drift. Requires `pg17_plus` on the *medium* tier, which is why `send_medium` gained that param. The row cut is a UNION of `(top 100 by total_exec_time)` and `(top 50 by io blocks)`: with the old single `ORDER BY total_exec_time DESC LIMIT 100`, a query doing heavy disk I/O but modest wall time was never fetched at all, so no amount of UI work could have surfaced it. `#[cfg(test)]` covers `io_blocks()` summing the four disk fields and ignoring `shared_blks_hit`.
 - `src/db/activity.rs` — `ActivityData{rows: Vec<ActivityRow>}` from `pg_stat_activity`, including `pg_blocking_pids(pid)` (built into Postgres since 9.6 — no hand-rolled `pg_locks` self-join needed for the blocking tree) and server-side-truncated query text (`left(query, 220)`). **Filtered to `state IS NOT NULL`** — background maintenance processes (checkpointer, bgwriter, walwriter, autovacuum launcher) have `state = NULL` and no query/state_change timestamp, so `duration_secs` falls back to their entire process uptime and would otherwise dominate the `ORDER BY duration_secs DESC` ahead of genuinely long-running queries (hit this exact bug during manual testing — a checkpointer alive for 40s outranked a 21s-old `pg_sleep` — fixed by the filter). An autovacuum *worker* actually running VACUUM has `state = 'active'` and still shows up, matching intent.
 - `src/db/serverinfo.rs` — `ServerInfo{version, uptime_secs, current_db_owner}`, one-shot fetch (see `event.rs` above).
+- `src/update.rs` (v17) — background release-check + staged-binary-swap, pure logic like the `db::*` modules above but with no `&Client`/SQL involved (it talks to GitHub, not Postgres). See the v17 Architecture note for the full design; not part of any poll tier, not gated by `PanelSnapshot`.
 
 All `db::*::fetch()` functions are pure `async fn(&Client) -> Result<T>` — independently callable/testable, no UI coupling.
 
-**Important invariant**: nothing in this codebase writes to stdout/stderr (`println!`/`eprintln!`) once `ratatui::init()` has run — the alt screen owns the terminal at that point, and direct writes corrupt the display in ways that look like application bugs (this was hit and fixed once already in v1: the background `Connection` driver task's error used to `eprintln!`, which visually looked like a stuck error banner during disconnect testing even though `App.error` was clearing correctly). Route anything that needs surfacing through `AppEvent` instead. Re-verified clean (grepped `src/` for stray `print!`/`println!`/`eprintln!` outside the two documented pre-TUI call sites) after the v2 expansion.
+**Important invariant**: nothing in this codebase writes to stdout/stderr (`println!`/`eprintln!`) once `ratatui::init()` has run — the alt screen owns the terminal at that point, and direct writes corrupt the display in ways that look like application bugs (this was hit and fixed once already in v1: the background `Connection` driver task's error used to `eprintln!`, which visually looked like a stuck error banner during disconnect testing even though `App.error` was clearing correctly). Route anything that needs surfacing through `AppEvent` instead. Re-verified clean (grepped `src/` for stray `print!`/`println!`/`eprintln!` outside the documented pre-TUI call sites — now three: the original connect-spinner path, the onboarding prompts, and (v17) `update::apply_staged_update_if_present()`'s error log, which is deliberately the very first thing `main()` does, before `ratatui::init()`) after the v2 expansion.
 
 The `build_conninfo()`/`quote_conninfo_value()` note from v1 still applies unchanged: libpq keyword/value conninfo strings are whitespace/quote-sensitive (an unescaped password with a space or quote used to corrupt the string) — any new code building a conninfo string by hand needs the same quoting, don't `format!` a raw value into one.
 
@@ -707,7 +777,14 @@ See `README.md` for user-facing usage/keybindings/tab reference.
 
 ## Scope
 
-v16 (current): mouse support extended beyond v10's original click-to-zoom — mouse-wheel scroll on all
+v17 (current): background auto-update — checks GitHub for a newer release once per launch (throttled
+to 24h), downloads and checksum-verifies it to a side path without ever touching the live process's
+own executable, and swaps it in only at the next launch via the `self-replace` crate; on by default,
+`--no-update-check` opts out. Configured to use `self_update`'s `ureq`+`rustls` backend specifically
+(not its default `reqwest` one) to keep the `ring` crypto-backend constraint from the Build
+requirement note above intact. Also fixed, same pass: `install.sh` could hang with no output on a
+stalled connection (added `curl` timeouts/retries) — see the v17 Architecture note for both. v16:
+mouse support extended beyond v10's original click-to-zoom — mouse-wheel scroll on all
 4 scrollable panes (the 3 detail panes plus Playground's transcript), clicking a table row to select
 it (Queries/Activity/Triggers/Tables & Indexes), and clicking a tab to switch — see the v16
 Architecture note. v15: Playground's transcript and live input now render inside one shared bordered

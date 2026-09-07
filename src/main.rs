@@ -9,6 +9,7 @@ mod event;
 mod format;
 mod onboarding;
 mod ui;
+mod update;
 
 use std::io::Write;
 use std::sync::Arc;
@@ -50,6 +51,15 @@ const PLAYGROUND_HISTORY_CAP: usize = 50;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Swap in a previously-staged update, if any — must happen before
+    // anything else touches the terminal or a connection, since a fresh
+    // process is the only safe place to replace its own executable file.
+    // Errors are non-fatal (stderr is still safe here, pre-ratatui::init()):
+    // a corrupted staged update must never block startup.
+    if let Err(e) = update::apply_staged_update_if_present() {
+        eprintln!("warning: failed to apply staged update: {e:#}");
+    }
+
     let cli = Cli::parse();
     let (mut conninfo, tls, conn_parts) = resolve_conninfo(&cli)?;
     let interval = Duration::from_secs(cli.interval.max(1));
@@ -168,10 +178,17 @@ async fn main() -> anyhow::Result<()> {
         tls,
         conn_parts,
         interval,
-        tx,
+        tx.clone(),
         refresh_now.clone(),
         control_rx,
     ));
+
+    // Fire-and-forget background release check — must not delay getting
+    // into the Postgres session, so it's spawned last and reports back over
+    // the same `tx` channel every other background task already uses.
+    if !cli.no_update_check {
+        tokio::spawn(update::update_check_task(tx));
+    }
 
     let result = run(&mut terminal, &mut app, rx, refresh_now, control_tx, playground_tx).await;
     if kitty_keyboard {

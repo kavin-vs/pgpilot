@@ -50,6 +50,10 @@ pub struct Cli {
     /// for terminals/fonts that don't render them cleanly
     #[arg(long)]
     pub ascii: bool,
+
+    /// Skip the background check for a newer release on GitHub
+    #[arg(long)]
+    pub no_update_check: bool,
 }
 
 impl Cli {

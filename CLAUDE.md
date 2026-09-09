@@ -45,6 +45,26 @@ For cases 2–3, TLS comes from the resolved `Profile`'s ssl fields, and passwor
 
 ## Architecture
 
+**v18**: Triggers' "Selected Trigger" pane, an always-visible inline block since v7, moved to a
+full-screen scrollable popup instead, on direct user request ("make the trigger query in full
+screen modal with scroll inside instead of having in bottom"). `ui/triggers.rs::draw()` no longer
+splits the tab into a `[Min(8), Percentage(35)]` table/detail pair — the table now takes the whole
+tab (`app.detail_pane_rect = None` always, since there's no inline pane left to click-zoom or hit-
+test) and `draw_detail`'s content (trigger DDL + full function body) only renders inside
+`draw_detail_popup`, reusing the exact full-screen-`Clear`-then-`draw_detail` mechanism v10 already
+built for Queries/Activity's click-to-zoom — no new rendering code. Since there's no pane to click
+anymore, opening it needed a new trigger: plain **`enter`**, gated to `app.active ==
+PanelKind::Triggers` and a non-empty `app.triggers` (`main.rs::handle_key`), sets the same
+`App::detail_popup_open` flag Queries/Activity's mouse click sets — closing (`esc`/`q`) and
+scrolling (`PageUp`/`PageDown`, mouse wheel) inside it are all pre-existing `detail_popup_open`
+handling, untouched. `main.rs::handle_mouse_click`'s `has_detail_pane` check dropped `Triggers`
+(the click-zoom path is now Queries/Activity-only — `detail_pane_rect` being permanently `None` for
+Triggers already made a click there a no-op, this just makes the dead branch explicit) but its
+`has_table`/row-select path keeps `Triggers` as before, since the table itself is unaffected.
+Footer help text (`ui/widgets.rs::draw_footer`) dropped Triggers from the `PgUp/PgDn: scroll detail`
+hint (only true for Queries/Activity's inline panes now) and gained its own `enter: view trigger`
+hint when that tab is active.
+
 **v17**: background auto-update, plus an unrelated `install.sh` reliability fix, both from a
 single direct user report ("implement auto update option ... also if i run mac installer again it
 is not showing any message -- stuck in there"). **`install.sh`**: both `curl` calls (the
@@ -777,7 +797,9 @@ See `README.md` for user-facing usage/keybindings/tab reference.
 
 ## Scope
 
-v17 (current): background auto-update — checks GitHub for a newer release once per launch (throttled
+v18 (current): Triggers' selected-trigger detail moved from an always-visible bottom pane to a
+full-screen scrollable popup (`enter` or click to open, `esc`/`q` to close) — see the v18
+Architecture note. v17: background auto-update — checks GitHub for a newer release once per launch (throttled
 to 24h), downloads and checksum-verifies it to a side path without ever touching the live process's
 own executable, and swaps it in only at the next launch via the `self-replace` crate; on by default,
 `--no-update-check` opts out. Configured to use `self_update`'s `ureq`+`rustls` backend specifically

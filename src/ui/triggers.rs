@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Rect},
     style::Style,
     text::Line,
     widgets::{Cell, Paragraph, Row, Table},
@@ -26,20 +26,18 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(8), Constraint::Percentage(35)])
-        .split(area);
-
-    app.detail_pane_rect = Some(rows[1]);
-    app.table_pane_rect = Some(rows[0]);
-    draw_table(frame, rows[0], app);
-    draw_detail(frame, rows[1], app);
+    // No inline bottom pane (unlike Queries/Activity) — table takes the
+    // whole tab, selected trigger's DDL/function body only shows in the
+    // full-screen popup below (`enter` or click), scrollable there.
+    app.detail_pane_rect = None;
+    app.table_pane_rect = Some(area);
+    draw_table(frame, area, app);
 }
 
-/// Full-screen zoom of `draw_detail`, opened by clicking the inline pane
-/// (`App::detail_popup_open`) — see `queries::draw_detail_popup` (same
-/// shape, mirrored per-tab since each tab's `draw_detail` builds different
+/// Full-screen view of the selected trigger's DDL/function body — opened by
+/// `enter` or, while it existed, clicking the old inline pane
+/// (`App::detail_popup_open`); see `queries::draw_detail_popup` (same shape,
+/// mirrored per-tab since each tab's `draw_detail` builds different
 /// content).
 pub(crate) fn draw_detail_popup(frame: &mut Frame, app: &App) {
     let area = frame.area();

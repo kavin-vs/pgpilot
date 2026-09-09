@@ -457,14 +457,19 @@ fn handle_key(
         KeyCode::Char('4') => app.set_active(PanelKind::TablesIndexes),
         KeyCode::Char('5') => app.set_active(PanelKind::Triggers),
         KeyCode::Char('6') => app.set_active(PanelKind::Playground),
+        // Triggers has no inline detail pane (unlike Queries/Activity) —
+        // enter opens the same full-screen scrollable popup a click does.
+        KeyCode::Enter if app.active == PanelKind::Triggers && app.triggers.as_ref().is_some_and(|t| !t.is_empty()) => {
+            app.detail_popup_open = true;
+        }
         KeyCode::Char('d') => app.open_db_popup(),
         KeyCode::Char('e') if !app.errors.is_empty() => app.error_detail_open = true,
         KeyCode::Char('g') => app.diagnosis_open = true,
         KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
         KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
-        // Scrolls whichever tab's detail pane is visible (Queries/Activity/
-        // Triggers) — a no-op on tabs without one, since only those three
-        // draw functions read `detail_scroll`.
+        // Scrolls whichever detail pane is visible (Queries/Activity's inline
+        // pane, or Triggers' popup once opened via enter) — a no-op
+        // otherwise, since only those draw functions read `detail_scroll`.
         KeyCode::PageDown => app.detail_scroll = app.detail_scroll.saturating_add(DETAIL_SCROLL_STEP),
         KeyCode::PageUp => app.detail_scroll = app.detail_scroll.saturating_sub(DETAIL_SCROLL_STEP),
         KeyCode::Char('s') => app.cycle_sort(),
@@ -887,7 +892,9 @@ fn handle_mouse_click(app: &mut App, mouse: MouseEvent) {
         return;
     }
 
-    let has_detail_pane = matches!(app.active, PanelKind::Queries | PanelKind::Activity | PanelKind::Triggers);
+    // Triggers has no inline detail pane to click (see triggers::draw) —
+    // `enter` is its only way to open the popup.
+    let has_detail_pane = matches!(app.active, PanelKind::Queries | PanelKind::Activity);
     if has_detail_pane && app.detail_pane_rect.is_some_and(|r| r.contains(click)) {
         app.detail_popup_open = true;
     }

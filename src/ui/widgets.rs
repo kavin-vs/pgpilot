@@ -232,7 +232,7 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             PanelKind::Queries | PanelKind::Activity | PanelKind::TablesIndexes | PanelKind::Triggers
         );
         let has_sort = matches!(app.active, PanelKind::Queries | PanelKind::TablesIndexes);
-        let has_detail = matches!(app.active, PanelKind::Queries | PanelKind::Activity | PanelKind::Triggers);
+        let has_detail = matches!(app.active, PanelKind::Queries | PanelKind::Activity);
 
         let mut help = "q: quit  1-6: view".to_string();
         if has_rows {
@@ -243,6 +243,9 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         }
         if has_detail {
             help.push_str("  PgUp/PgDn: scroll detail");
+        }
+        if app.active == PanelKind::Triggers {
+            help.push_str("  enter: view trigger");
         }
         if app.active == PanelKind::Activity {
             help.push_str("  x/X: cancel/terminate");

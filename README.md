@@ -50,6 +50,16 @@ PgPilot also scores what it sees against known incident patterns — xid wraparo
 checkpoint storms, lock chains, disk spill, replication lag — and surfaces a ranked
 "here's what's probably wrong" list, derived entirely from data it was fetching anyway.
 
+**Standout:** diagnosis engine (`g` key, auto root-cause across 11 issue types), Playground
+SQL REPL (own connection, never freezes monitoring), per-query disk I/O sort on Queries
+tab. Also: mouse support, saved SSL profiles, tiered non-blocking polling, blocking-tree
+view.
+
+**Who it's for:** backend devs, DBAs, SREs who want an `htop`/`k9s`-style live Postgres
+view without heavy tooling. Use it for live incident triage over SSH, running ad-hoc SQL
+without switching to `psql`, or ongoing lightweight monitoring on dev/staging/prod. Not
+for historical metrics or fleet-wide monitoring.
+
 ---
 
 ## 2. Installation
@@ -151,7 +161,7 @@ query mode, the TUI *is* the product. Six tabs, switched with `1`–`6`:
 | `2` | Queries | `pg_stat_statements`-backed table (total/mean/stddev time, calls, disk I/O bytes, disk time, cache hit), sortable — including by disk I/O, which finds the query hammering storage even when its wall-clock time looks unremarkable — with a detail pane breaking out shared reads/writes, temp-file spill, and disk time for the selected statement. Disk time needs `track_io_timing = on` (off by default); the byte columns work regardless. Shows a clear "extension not loaded" notice instead of erroring if `pg_stat_statements` isn't installed — everything else in pgpilot works without it |
 | `3` | Activity | Connection-state summary cards, the full `pg_stat_activity` list (selectable) with an always-visible detail pane for the selected backend, a blocking tree, and a lock/transaction summary |
 | `4` | Tables & Indexes | Schema size totals, a table list (dead-tuple %, xid age, seq-scans/hour, last autovacuum), unused/invalid indexes (with reclaimable size), and missing-index candidates (unindexed foreign keys, high seq-scan-ratio tables) |
-| `5` | Triggers | Every user-defined trigger (`pg_trigger`, excluding internal foreign-key-backing ones) — schema, table, function, enabled/disabled state — with an always-visible detail pane showing that trigger's DDL (`pg_get_triggerdef`) and its function's full source (`pg_get_functiondef`) |
+| `5` | Triggers | Every user-defined trigger (`pg_trigger`, excluding internal foreign-key-backing ones) — schema, table, function, enabled/disabled state. `enter` (or a click) opens the selected trigger's DDL (`pg_get_triggerdef`) and its function's full source (`pg_get_functiondef`) in a full-screen, scrollable popup — `esc`/`q` closes it |
 | `6` | Playground | A psql-style REPL against the live connection, on its own dedicated database connection so a slow query here never freezes the other tabs' live monitoring. The transcript and live input share one bordered box, no seam between output and input. A scrolling transcript (`dbname=>` prompts, a plain `->` for continuation lines) shows every command run this session; `enter` runs a `;`-terminated statement, otherwise starts a continuation line. Non-`SELECT` statements need a second `enter` to confirm before they run; `tab` completes SQL keywords/schema/table names (cycling on repeat); `ctrl-c` cancels a running query (or clears the buffer if nothing's running); `↑`/`↓` recall history inline. Result tables match real `psql`'s own aligned format. A single bare `SELECT` loads 200 rows at a time — scroll (`PageDown`) to the bottom to fetch the next page, same idea as DBeaver's chunked fetch. A handful of readline/nvim-insert-mode chords (`ctrl-w`/`u`/`k`, word/buffer jumps) round out the editor — see §7. The transcript and drafts are in-memory only — nothing is written to disk |
 
 ---
@@ -325,11 +335,12 @@ instead of leaving you to notice the raw numbers yourself.
 |---|---|
 | `1`–`6` | Switch tab |
 | `↑`/`↓` or `j`/`k` | Scroll/select rows on the current tab (Queries, Activity, Tables & Indexes, Triggers) |
-| `PageUp` / `PageDown` | Scroll the detail pane's text (Queries, Activity, Triggers, and Playground's transcript) when it overflows the pane |
-| Mouse wheel | Scroll the detail pane under the cursor (Queries, Activity, Triggers — also works once it's zoomed into a full-screen popup) or the Playground transcript (whenever that tab is active, regardless of cursor position) |
+| `PageUp` / `PageDown` | Scroll the detail pane's text (Queries, Activity, Playground's transcript, and Triggers' popup once open) when it overflows the pane |
+| Mouse wheel | Scroll the detail pane under the cursor (Queries, Activity — also works once zoomed into a full-screen popup, same as Triggers' popup) or the Playground transcript (whenever that tab is active, regardless of cursor position) |
 | Click a row | Select it (Queries, Activity, Tables & Indexes, Triggers) — same effect as moving `j`/`k` onto it |
 | Click a tab | Switch to it — same effect as its `1`–`6` key |
-| Click detail pane | Zoom the detail pane (Queries, Activity, Triggers) into a full-screen popup — `esc`/`q` closes it, `PageUp`/`PageDown`/mouse wheel still scroll while it's open |
+| Click detail pane | Zoom the detail pane (Queries, Activity) into a full-screen popup — `esc`/`q` closes it, `PageUp`/`PageDown`/mouse wheel still scroll while it's open |
+| `enter` (Triggers tab) | Open the selected trigger's DDL/function body in a full-screen, scrollable popup — `esc`/`q` closes it |
 | `s` | Cycle sort (Queries: total time → mean time → calls → disk I/O; Tables & Indexes: size/name, press again to reverse) |
 | `x` / `X` | Cancel / terminate the selected Activity row's backend (`pg_cancel_backend`/`pg_terminate_backend`) — real, immediate, no confirmation prompt, same spirit as `htop`'s kill. Requires the `pg_signal_backend` role (or superuser); otherwise the attempt fails with a status message, not a crash |
 | `space` | Pause/resume polling |

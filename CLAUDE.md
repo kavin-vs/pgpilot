@@ -45,6 +45,30 @@ For cases 2–3, TLS comes from the resolved `Profile`'s ssl fields, and passwor
 
 ## Architecture
 
+**v19**: two auto-update (v17) fixes, both from a direct user report ("auto update is not
+happening; last release is not updated in my machine itself"). Root cause on that machine: the
+one-shot per-launch check (`update::update_check_task`) ran 6 minutes *before* the new release was
+published, then the 24h throttle (`update::CHECK_INTERVAL`) blocked any retry until the next day —
+not a bug, but it exposed two real gaps in `src/update.rs`, both fixed here. (1) **`--force-update-check`**
+(`src/cli.rs`, threaded through `main.rs` into `update::update_check_task(tx, force)`) bypasses
+`due_for_check`'s throttle for one launch — everything downstream (fetch/stage/timestamp
+persistence) is unchanged. (2) Two silent-failure gaps: `update_check_task`'s `load_state()` call
+used to be `let Ok(state) = load_state() else { return }` — a corrupted/unreadable
+`update_state.toml` disabled the updater *permanently*, every launch, with zero recovery; changed
+to `.unwrap_or_default()`, mirroring the recovery pattern `check_and_stage_blocking` already used
+one function away (inconsistent handling of the identical failure mode in the same file). And any
+check failure (network, GitHub rate limit, checksum mismatch) was fully swallowed
+(`if let Ok(Ok(Some(version))) = ...`), so a persistent failure looked identical to "just not due
+yet" — `UpdateState` gained `last_error: Option<String>`, set to `Some(format!("{e:#}"))` on a
+failed `fetch_and_stage` (and cleared on success) by `check_and_stage_blocking` before its existing
+`save_state` call, giving a durable on-disk trace without touching the footer's status line (the
+"never compete with live DB feedback" design from v17 is unchanged — this is diagnosability via the
+state file, same as `last_checked_unix` already works, not a new UI surface). Verified end-to-end
+against the real GitHub API: a manual `check_and_stage_blocking()` call hit an actual unauthenticated
+rate limit (HTTP 403) live during testing, and `last_error` correctly persisted that exact message
+to `update_state.toml` — the same rate-limit class of failure CLAUDE.md's v17/install.sh notes
+already flag as a real risk, now visible instead of silent.
+
 **v18**: Triggers' "Selected Trigger" pane, an always-visible inline block since v7, moved to a
 full-screen scrollable popup instead, on direct user request ("make the trigger query in full
 screen modal with scroll inside instead of having in bottom"). `ui/triggers.rs::draw()` no longer
@@ -797,7 +821,9 @@ See `README.md` for user-facing usage/keybindings/tab reference.
 
 ## Scope
 
-v18 (current): Triggers' selected-trigger detail moved from an always-visible bottom pane to a
+v19 (current): `--force-update-check` bypasses the auto-update throttle, and two silent-failure
+gaps in the v17 updater (a corrupted state file permanently disabling checks, and check failures
+leaving no trace) are fixed — see the v19 Architecture note. v18: Triggers' selected-trigger detail moved from an always-visible bottom pane to a
 full-screen scrollable popup (`enter` or click to open, `esc`/`q` to close) — see the v18
 Architecture note. v17: background auto-update — checks GitHub for a newer release once per launch (throttled
 to 24h), downloads and checksum-verifies it to a side path without ever touching the live process's

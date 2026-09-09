@@ -187,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
     // into the Postgres session, so it's spawned last and reports back over
     // the same `tx` channel every other background task already uses.
     if !cli.no_update_check {
-        tokio::spawn(update::update_check_task(tx));
+        tokio::spawn(update::update_check_task(tx, cli.force_update_check));
     }
 
     let result = run(&mut terminal, &mut app, rx, refresh_now, control_tx, playground_tx).await;

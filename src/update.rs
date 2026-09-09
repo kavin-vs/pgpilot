@@ -40,6 +40,13 @@ struct UpdateState {
     last_checked_unix: Option<u64>,
     #[serde(default)]
     staged_version: Option<String>,
+    /// Set when the most recent check attempt failed (network, rate limit,
+    /// checksum mismatch, ...), cleared on the next successful attempt.
+    /// Otherwise a persistent failure is indistinguishable from "not due
+    /// yet" — this is the diagnostic trail for that case, kept out of the
+    /// footer status line deliberately (see `update_check_task`'s doc).
+    #[serde(default)]
+    last_error: Option<String>,
 }
 
 fn config_dir() -> Result<PathBuf> {
@@ -114,6 +121,7 @@ fn check_and_stage_blocking() -> Result<Option<String>> {
     state.last_checked_unix = Some(now_unix());
 
     let outcome = fetch_and_stage(&mut state);
+    state.last_error = outcome.as_ref().err().map(|e| format!("{e:#}"));
     let _ = save_state(&state);
     outcome
 }
@@ -159,10 +167,17 @@ fn fetch_and_stage(state: &mut UpdateState) -> Result<Option<String>> {
 /// Spawned fire-and-forget from `main()`, same pattern as `poll_task`/
 /// `playground_task`. Silent on any failure — a background update check
 /// hiccupping on network shouldn't compete with real DB feedback on the
-/// footer's one status line, and must never crash the app.
-pub async fn update_check_task(tx: mpsc::Sender<AppEvent>) {
-    let Ok(state) = load_state() else { return };
-    if !due_for_check(&state) {
+/// footer's one status line, and must never crash the app. Failures are
+/// still recorded (see `UpdateState::last_error`) so they're not *invisible*,
+/// just not disruptive. `force` (from `--force-update-check`) bypasses the
+/// 24h throttle for this one launch only — the throttle-timestamp bookkeeping
+/// itself is untouched.
+pub async fn update_check_task(tx: mpsc::Sender<AppEvent>, force: bool) {
+    // A corrupt/unreadable state file degrades to "never checked" rather
+    // than disabling the updater forever — same recovery as
+    // `check_and_stage_blocking` uses one function away.
+    let state = load_state().unwrap_or_default();
+    if !force && !due_for_check(&state) {
         return;
     }
 
@@ -211,19 +226,31 @@ mod tests {
 
     #[test]
     fn due_for_check_when_never_checked() {
-        let state = UpdateState { last_checked_unix: None, staged_version: None };
+        let state = UpdateState::default();
         assert!(due_for_check(&state));
     }
 
     #[test]
     fn due_for_check_respects_throttle() {
-        let fresh = UpdateState { last_checked_unix: Some(now_unix()), staged_version: None };
+        let fresh = UpdateState { last_checked_unix: Some(now_unix()), ..Default::default() };
         assert!(!due_for_check(&fresh));
 
         let stale = UpdateState {
             last_checked_unix: Some(now_unix() - CHECK_INTERVAL.as_secs() - 1),
-            staged_version: None,
+            ..Default::default()
         };
         assert!(due_for_check(&stale));
+    }
+
+    #[test]
+    fn corrupt_state_toml_falls_back_to_default_instead_of_erroring() {
+        // Mirrors what `load_state()` would return for a corrupted
+        // `update_state.toml` — `update_check_task` must treat this as
+        // "never checked" (via `.unwrap_or_default()`), not permanently
+        // disable itself.
+        let parsed: Result<UpdateState, _> = toml::from_str("not valid toml {{{");
+        assert!(parsed.is_err());
+        let state = parsed.unwrap_or_default();
+        assert!(due_for_check(&state));
     }
 }

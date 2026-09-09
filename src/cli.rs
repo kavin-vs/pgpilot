@@ -54,6 +54,10 @@ pub struct Cli {
     /// Skip the background check for a newer release on GitHub
     #[arg(long)]
     pub no_update_check: bool,
+
+    /// Check for a newer release now, bypassing the 24h throttle
+    #[arg(long)]
+    pub force_update_check: bool,
 }
 
 impl Cli {
